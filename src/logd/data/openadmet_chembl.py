@@ -46,22 +46,31 @@ CACHE_FILE: Final[str] = "openadmet_chembl_logd.parquet"
 MIN_LOGD: Final[float] = -5.0
 MAX_LOGD: Final[float] = 10.0
 
-# Column names observed; normalise at load.
-_SMILES_CANDIDATES = ("SMILES", "smiles", "canonical_smiles", "Canonical_SMILES")
-_LOGD_CANDIDATES = ("LogD", "logD", "logd", "LOGD", "value", "standard_value", "logD7.4")
-
-
-def _pick(cols: list[str], candidates: tuple[str, ...], label: str) -> str:
-    for c in candidates:
-        if c in cols:
-            return c
-    raise ValueError(f"No {label} column from {candidates} found; got {cols}")
+# Actual columns in OpenADMET's aggregated parquet (verified 2026-04-20):
+#   OPENADMET_CANONICAL_SMILES, OPENADMET_INCHIKEY
+#   assay_id_count
+#   standard_value_mean, standard_value_median, standard_value_std
+#   pchembl_value_mean, pchembl_value_median, pchembl_value_std
+# We use standard_value_median as the target (robust to assay outliers) and
+# standard_value_std as the per-compound noise estimate (used later in the
+# data-quality audit — no extra computation needed).
+SMILES_COL: Final[str] = "OPENADMET_CANONICAL_SMILES"
+INCHIKEY_COL: Final[str] = "OPENADMET_INCHIKEY"
+LOGD_COL: Final[str] = "standard_value_median"
+LOGD_STD_COL: Final[str] = "standard_value_std"
+N_ASSAYS_COL: Final[str] = "assay_id_count"
 
 
 def fetch(cache: Path | None = None, refresh: bool = False) -> pd.DataFrame:
     """Download + clean OpenADMET ChEMBL35 LogD aggregated parquet.
 
-    Returns a DataFrame with columns [smiles, logd, inchikey].
+    Returns a DataFrame with columns:
+      - smiles    — canonical SMILES
+      - logd      — per-compound median across assays
+      - logd_std  — per-compound std across assays (noise floor estimate)
+      - n_assays  — number of assay observations
+      - inchikey  — canonical InChIKey (used for cross-dataset dedup)
+
     Cached locally in parquet for repeat runs.
     """
     cache = cache or (data_dir() / CACHE_FILE)
@@ -73,18 +82,31 @@ def fetch(cache: Path | None = None, refresh: bool = False) -> pd.DataFrame:
     df = pd.read_parquet(AGGREGATED_URL)
     LOG.info("Fetched %d raw rows with columns: %s", len(df), list(df.columns))
 
-    smi_col = _pick(list(df.columns), _SMILES_CANDIDATES, "SMILES")
-    y_col = _pick(list(df.columns), _LOGD_CANDIDATES, "LogD")
+    required = [SMILES_COL, LOGD_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Expected columns missing: {missing}; got {list(df.columns)}")
 
-    df = df[[smi_col, y_col]].rename(columns={smi_col: "smiles", y_col: "logd"})
+    df = df.rename(
+        columns={
+            SMILES_COL: "smiles",
+            LOGD_COL: "logd",
+            LOGD_STD_COL: "logd_std",
+            N_ASSAYS_COL: "n_assays",
+            INCHIKEY_COL: "inchikey",
+        }
+    )
     df["logd"] = pd.to_numeric(df["logd"], errors="coerce")
     df = df.dropna(subset=["smiles", "logd"])
     df = df[(df["logd"] >= MIN_LOGD) & (df["logd"] <= MAX_LOGD)]
 
+    # Canonicalise + desalt via our own RDKit pipeline; OpenADMET's canonical
+    # form is fine, but we want consistency with ExpansionRx handling.
     df["smiles"] = df["smiles"].map(canonicalise)
     df = df.dropna(subset=["smiles"]).reset_index(drop=True)
 
-    # Compute InChIKey for cross-dataset dedup (vs ExpansionRx).
+    # Recompute InChIKey for safety (OpenADMET precomputed one exists but we
+    # canonicalised with desalting, which can change the key).
     from rdkit import Chem
 
     df["inchikey"] = df["smiles"].map(
@@ -92,12 +114,19 @@ def fetch(cache: Path | None = None, refresh: bool = False) -> pd.DataFrame:
     )
     df = df.dropna(subset=["inchikey"])
 
-    # One-compound-per-row after canonicalisation (aggregated is already
-    # deduplicated by OpenADMET, but enforce it defensively).
+    # Enforce one-compound-per-row after canonicalisation.
     df = df.groupby("inchikey", as_index=False).agg(
-        smiles=("smiles", "first"), logd=("logd", "median")
+        smiles=("smiles", "first"),
+        logd=("logd", "median"),
+        logd_std=("logd_std", "median") if "logd_std" in df.columns else ("logd", "size"),
+        n_assays=("n_assays", "sum") if "n_assays" in df.columns else ("logd", "size"),
     )
-    df = df[["smiles", "logd", "inchikey"]].reset_index(drop=True)
+    keep_cols = ["smiles", "logd", "inchikey"]
+    if "logd_std" in df.columns:
+        keep_cols.append("logd_std")
+    if "n_assays" in df.columns:
+        keep_cols.append("n_assays")
+    df = df[keep_cols].reset_index(drop=True)
 
     df.to_parquet(cache, index=False)
     LOG.info("Wrote %d unique compounds to %s", len(df), cache)
