@@ -1,6 +1,8 @@
-"""End-to-end training: ChEMBL → features → baseline ensemble → calibration → artifact.
+"""End-to-end training: OpenADMET ChEMBL35 → features → ensemble → calibration → artifact.
 
-Day-1 deliverable. Chemprop training lands Day 2 in a sibling script.
+Training data: OpenADMET's curated ChEMBL35 LogD aggregated parquet (pinned SHA).
+External eval: ExpansionRx challenge training data (pinned HF revision).
+Cross-dataset deduplication by InChIKey prevents leakage.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from logd.data import chembl, openadmet, splits
+from logd.data import expansionrx, openadmet_chembl, splits
 from logd.features import FeatureSpec, featurise_batch, morgan_fp, mol_from_smiles
 from logd.models.baseline import train_ensemble
 from logd.models.chemprop_wrap import ChempropModel
@@ -50,9 +52,22 @@ def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1) -> dict:
     """Full Day-1 pipeline. Returns metrics dict, writes artifacts to models/."""
     set_seed(seed)
 
-    LOG.info("Loading ChEMBL logD data")
-    df = chembl.load()
+    LOG.info("Loading OpenADMET ChEMBL35 logD data")
+    df = openadmet_chembl.load()
     LOG.info("Loaded %d compounds", len(df))
+
+    # Drop any training compound that also appears in the ExpansionRx external
+    # test — prevents leakage if OpenADMET's curation happened to pull in any
+    # overlapping InChIKeys.
+    LOG.info("Loading ExpansionRx external test to deduplicate training")
+    eval_df = expansionrx.load()
+    eval_keys = set(eval_df["inchikey"])
+    overlap = df["inchikey"].isin(eval_keys).sum()
+    if overlap > 0:
+        LOG.warning("Dropping %d training compounds that overlap ExpansionRx test", overlap)
+        df = df[~df["inchikey"].isin(eval_keys)].reset_index(drop=True)
+    else:
+        LOG.info("No overlap between training and ExpansionRx test (clean)")
 
     LOG.info("Computing scaffold split")
     split = splits.scaffold_split(df["smiles"], seed=seed)
@@ -113,14 +128,13 @@ def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1) -> dict:
         conformal=conformal, ad=ad, std_threshold=std_thr, tanimoto_threshold=tani_thr
     )
 
-    # OpenADMET external eval.
-    LOG.info("Evaluating on OpenADMET logD benchmark")
-    openadmet_df = openadmet.load()
-    X_oa, oa_mask = featurise_batch(openadmet_df["smiles"].tolist(), feature_spec)
-    y_oa = openadmet_df["logd"].to_numpy()[oa_mask]
+    # ExpansionRx external eval (already loaded above for dedup).
+    LOG.info("Evaluating on ExpansionRx logD benchmark (%d compounds)", len(eval_df))
+    X_oa, oa_mask = featurise_batch(eval_df["smiles"].tolist(), feature_spec)
+    y_oa = eval_df["logd"].to_numpy()[oa_mask]
     oa_pred, oa_std = model.predict(X_oa)
     oa_fps = np.stack(
-        [morgan_fp(mol_from_smiles(s)) for s, m in zip(openadmet_df["smiles"].tolist(), oa_mask) if m],
+        [morgan_fp(mol_from_smiles(s)) for s, m in zip(eval_df["smiles"].tolist(), oa_mask) if m],
         axis=0,
     )
     oa_nn = ad.nearest_similarity(oa_fps)
@@ -131,14 +145,14 @@ def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1) -> dict:
         "n_train": int(len(y_train)),
         "n_val": int(len(y_val)),
         "n_test": int(len(y_test)),
-        "n_openadmet": int(len(y_oa)),
+        "n_expansionrx": int(len(y_oa)),
         "scaffold_test": {
             "rmse": _rmse(y_test, y_test_pred),
             "mae": _mae(y_test, y_test_pred),
             "pearson_r": _pearson(y_test, y_test_pred),
             "spearman_std_vs_abs_err": _spearman(y_test_std, np.abs(y_test - y_test_pred)),
         },
-        "openadmet": {
+        "expansionrx": {
             "rmse": _rmse(y_oa, oa_pred),
             "mae": _mae(y_oa, oa_pred),
             "pearson_r": _pearson(y_oa, oa_pred),
@@ -176,9 +190,22 @@ def train_chemprop(
     """
     set_seed(seed)
 
-    LOG.info("Loading ChEMBL logD data")
-    df = chembl.load()
+    LOG.info("Loading OpenADMET ChEMBL35 logD data")
+    df = openadmet_chembl.load()
     LOG.info("Loaded %d compounds", len(df))
+
+    # Drop any training compound that also appears in the ExpansionRx external
+    # test — prevents leakage if OpenADMET's curation happened to pull in any
+    # overlapping InChIKeys.
+    LOG.info("Loading ExpansionRx external test to deduplicate training")
+    eval_df = expansionrx.load()
+    eval_keys = set(eval_df["inchikey"])
+    overlap = df["inchikey"].isin(eval_keys).sum()
+    if overlap > 0:
+        LOG.warning("Dropping %d training compounds that overlap ExpansionRx test", overlap)
+        df = df[~df["inchikey"].isin(eval_keys)].reset_index(drop=True)
+    else:
+        LOG.info("No overlap between training and ExpansionRx test (clean)")
 
     LOG.info("Computing scaffold split")
     split = splits.scaffold_split(df["smiles"], seed=seed)
@@ -228,11 +255,10 @@ def train_chemprop(
         conformal=conformal, ad=ad, std_threshold=std_thr, tanimoto_threshold=tani_thr
     )
 
-    # OpenADMET external eval.
-    LOG.info("Evaluating Chemprop on OpenADMET logD benchmark")
-    openadmet_df = openadmet.load()
-    oa_smiles = openadmet_df["smiles"].tolist()
-    oa_y = openadmet_df["logd"].to_numpy()
+    # ExpansionRx external eval (eval_df already loaded + deduped above).
+    LOG.info("Evaluating Chemprop on ExpansionRx logD benchmark (%d compounds)", len(eval_df))
+    oa_smiles = eval_df["smiles"].tolist()
+    oa_y = eval_df["logd"].to_numpy()
     oa_pred, oa_std, oa_mask = model.predict_smiles(oa_smiles)
 
     metrics = {
@@ -242,7 +268,7 @@ def train_chemprop(
         "n_train": int(len(train_smiles)),
         "n_val": int(len(val_smiles)),
         "n_test": int(len(test_smiles)),
-        "n_openadmet": int(oa_mask.sum()),
+        "n_expansionrx": int(oa_mask.sum()),
         "scaffold_test": {
             "rmse": _rmse(y_test[test_mask], test_pred),
             "mae": _mae(y_test[test_mask], test_pred),
@@ -251,7 +277,7 @@ def train_chemprop(
                 test_std, np.abs(y_test[test_mask] - test_pred)
             ),
         },
-        "openadmet": {
+        "expansionrx": {
             "rmse": _rmse(oa_y[oa_mask], oa_pred),
             "mae": _mae(oa_y[oa_mask], oa_pred),
             "pearson_r": _pearson(oa_y[oa_mask], oa_pred),

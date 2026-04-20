@@ -23,13 +23,13 @@ app = typer.Typer(add_completion=False, no_args_is_help=True, help="logD predict
 
 @app.command("prepare-data")
 def prepare_data(refresh: bool = typer.Option(False, help="Re-fetch even if cached")) -> None:
-    """Fetch + clean ChEMBL logD and OpenADMET benchmark."""
-    from logd.data import chembl, openadmet
+    """Fetch + clean OpenADMET ChEMBL35 LogD + ExpansionRx benchmark."""
+    from logd.data import expansionrx, openadmet_chembl
 
-    df = chembl.load(refresh=refresh)
-    typer.echo(f"ChEMBL: {len(df)} compounds")
-    oa = openadmet.load(refresh=refresh)
-    typer.echo(f"OpenADMET: {len(oa)} compounds")
+    df = openadmet_chembl.load(refresh=refresh)
+    typer.echo(f"OpenADMET ChEMBL35 LogD: {len(df)} compounds")
+    oa = expansionrx.load(refresh=refresh)
+    typer.echo(f"ExpansionRx: {len(oa)} compounds")
 
 
 @app.command("train")

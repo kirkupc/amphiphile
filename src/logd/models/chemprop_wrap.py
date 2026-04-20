@@ -104,7 +104,7 @@ class ChempropModel:
         base_seed: int = 0,
     ) -> None:
         """Train k ensemble members. Checkpoints saved to self.checkpoint_dir."""
-        import pytorch_lightning as pl
+        import lightning.pytorch as pl
 
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.k = k
@@ -170,7 +170,7 @@ class ChempropModel:
 
     @torch.no_grad()
     def _predict_member(self, model, smiles: list[str]) -> np.ndarray:
-        import pytorch_lightning as pl
+        import lightning.pytorch as pl
 
         loader = _build_loader(smiles, None, DEFAULT_BATCH_SIZE, shuffle=False)
         trainer = pl.Trainer(
