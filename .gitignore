@@ -32,9 +32,9 @@ build/
 !/reports/error_analysis/
 !/reports/error_analysis/.gitkeep
 
-notebooks/
-*.ipynb_checkpoints/
+notebooks/*
 !notebooks/train_chemprop_colab.ipynb
+*.ipynb_checkpoints/
 
 .DS_Store
 .env
