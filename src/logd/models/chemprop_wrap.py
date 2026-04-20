@@ -64,7 +64,7 @@ def _build_datapoints(smiles: list[str], y: np.ndarray | None = None):
 
 
 def _safe_collate_batch(batch):
-    """Collate with explicit numpy copies to avoid SIGSEGV from CoW + torch.from_numpy.
+    """Collate with ``torch.tensor`` copies to avoid SIGSEGV from NumPy CoW.
 
     Chemprop's ``BatchMolGraph.__post_init__`` calls ``torch.from_numpy`` on
     arrays concatenated from per-molecule ``MolGraph`` numpy buffers.  With
@@ -73,32 +73,69 @@ def _safe_collate_batch(batch):
     mechanism later reallocates the numpy side, the tensor is left pointing at
     freed memory, causing a SIGSEGV inside Lightning's training loop.
 
-    We work around this by copying each ``MolGraph``'s arrays before
-    ``BatchMolGraph`` is constructed so every tensor owns its own memory.
+    We work around this by constructing the batched molecular graph ourselves
+    using ``torch.tensor`` (which always copies) instead of
+    ``torch.from_numpy`` (which shares memory with the numpy array).
     """
-    from chemprop.data.collate import BatchMolGraph, TrainingBatch
+    from chemprop.data.collate import TrainingBatch
 
     mgs, V_ds, x_ds, ys, weights, lt_masks, gt_masks = zip(*batch)
 
-    # Deep-copy the numpy arrays inside each MolGraph so torch.from_numpy
-    # gets a stable, owned buffer instead of a CoW view.
-    safe_mgs = []
-    for mg in mgs:
-        mg.V = np.array(mg.V, copy=True)
-        mg.E = np.array(mg.E, copy=True)
-        mg.edge_index = np.array(mg.edge_index, copy=True)
-        mg.rev_edge_index = np.array(mg.rev_edge_index, copy=True)
-        safe_mgs.append(mg)
+    # Build the batched molecular graph manually, using torch.tensor (copies)
+    # instead of torch.from_numpy (zero-copy / shares memory).
+    bmg = _build_safe_batch_mol_graph(mgs)
 
     return TrainingBatch(
-        BatchMolGraph(safe_mgs),
-        None if V_ds[0] is None else torch.from_numpy(np.concatenate(V_ds)).float(),
-        None if x_ds[0] is None else torch.from_numpy(np.array(x_ds)).float(),
-        None if ys[0] is None else torch.from_numpy(np.array(ys)).float(),
+        bmg,
+        None if V_ds[0] is None else torch.tensor(np.concatenate(V_ds), dtype=torch.float),
+        None if x_ds[0] is None else torch.tensor(np.array(x_ds), dtype=torch.float),
+        None if ys[0] is None else torch.tensor(np.array(ys), dtype=torch.float),
         torch.tensor(weights, dtype=torch.float).unsqueeze(1),
-        None if lt_masks[0] is None else torch.from_numpy(np.array(lt_masks)),
-        None if gt_masks[0] is None else torch.from_numpy(np.array(gt_masks)),
+        None if lt_masks[0] is None else torch.tensor(np.array(lt_masks)),
+        None if gt_masks[0] is None else torch.tensor(np.array(gt_masks)),
     )
+
+
+def _build_safe_batch_mol_graph(mgs):
+    """Build a BatchMolGraph-compatible object using torch.tensor (copies).
+
+    Replaces ``BatchMolGraph.__post_init__`` which uses ``torch.from_numpy``
+    and triggers SIGSEGV on macOS with NumPy >= 2.0 due to CoW semantics.
+    """
+    from chemprop.data.collate import BatchMolGraph
+
+    Vs, Es, edge_indexes, rev_edge_indexes, batch_indexes = [], [], [], [], []
+    num_nodes = 0
+    num_edges = 0
+
+    for i, mg in enumerate(mgs):
+        Vs.append(np.ascontiguousarray(mg.V))
+        Es.append(np.ascontiguousarray(mg.E))
+        edge_indexes.append(np.ascontiguousarray(mg.edge_index) + num_nodes)
+        rev_edge_indexes.append(np.ascontiguousarray(mg.rev_edge_index) + num_edges)
+        batch_indexes.extend([i] * mg.V.shape[0])
+        num_nodes += mg.V.shape[0]
+        num_edges += mg.edge_index.shape[1]
+
+    V_np = np.concatenate(Vs).astype(np.float32)
+    E_np = np.concatenate(Es).astype(np.float32)
+    ei_np = np.hstack(edge_indexes).astype(np.int64)
+    rei_np = np.concatenate(rev_edge_indexes).astype(np.int64)
+    bi_np = np.array(batch_indexes, dtype=np.int64)
+
+    # Use object.__new__ to create a BatchMolGraph without calling __post_init__
+    # (which uses torch.from_numpy that triggers SIGSEGV).
+    bmg = object.__new__(BatchMolGraph)
+    # Set the private __size field (name-mangled to _BatchMolGraph__size)
+    object.__setattr__(bmg, "_BatchMolGraph__size", len(mgs))
+
+    # Use torch.tensor (copies data) instead of torch.from_numpy (zero-copy)
+    object.__setattr__(bmg, "V", torch.tensor(V_np))
+    object.__setattr__(bmg, "E", torch.tensor(E_np))
+    object.__setattr__(bmg, "edge_index", torch.tensor(ei_np))
+    object.__setattr__(bmg, "rev_edge_index", torch.tensor(rei_np))
+    object.__setattr__(bmg, "batch", torch.tensor(bi_np))
+    return bmg
 
 
 def _build_loader(smiles: list[str], y: np.ndarray | None, batch_size: int, shuffle: bool):
@@ -190,7 +227,7 @@ class ChempropModel:
                 devices=1,
                 logger=False,
                 enable_checkpointing=False,
-                enable_progress_bar=False,
+                enable_progress_bar=True,
                 enable_model_summary=(i == 0),
                 gradient_clip_val=1.0,
             )
