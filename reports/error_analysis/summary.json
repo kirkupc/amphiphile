@@ -1,0 +1,8 @@
+{
+  "top": 10,
+  "loud_failures": 10,
+  "silent_failures": 0,
+  "median_ensemble_std": 0.12769354915116818,
+  "std_threshold": 0.16705103727280377,
+  "tanimoto_threshold": 0.551751446723938
+}
