@@ -16,6 +16,7 @@ times, so each checkpoint is independently loadable with Chemprop's own API.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +28,12 @@ from logd.utils import get_logger, set_seed
 LOG = get_logger(__name__)
 
 DEFAULT_MAX_EPOCHS = 50
-DEFAULT_BATCH_SIZE = 64
+# Batch size 32: avoids a segfault in Chemprop's BatchMolGraph collation that
+# occurs when large drug-like molecules (avg ~30 heavy atoms) are batched at
+# size 64+.  The crash is a numpy/PyTorch memory corruption triggered by
+# torch.from_numpy on the concatenated graph arrays.  Size 32 stays well under
+# the threshold while keeping training speed reasonable.
+DEFAULT_BATCH_SIZE = 32
 DEFAULT_NUM_WORKERS = 0  # Chemprop's default; raises on macOS if we set >0 here
 
 
@@ -57,17 +63,64 @@ def _build_datapoints(smiles: list[str], y: np.ndarray | None = None):
     return [data.MoleculeDatapoint.from_smi(s, [float(yi)]) for s, yi in zip(smiles, y)]
 
 
+def _safe_collate_batch(batch):
+    """Collate with explicit numpy copies to avoid SIGSEGV from CoW + torch.from_numpy.
+
+    Chemprop's ``BatchMolGraph.__post_init__`` calls ``torch.from_numpy`` on
+    arrays concatenated from per-molecule ``MolGraph`` numpy buffers.  With
+    NumPy >= 2.0 copy-on-write semantics, those buffers may share a backing
+    store; ``torch.from_numpy`` creates a zero-copy tensor view.  If the CoW
+    mechanism later reallocates the numpy side, the tensor is left pointing at
+    freed memory, causing a SIGSEGV inside Lightning's training loop.
+
+    We work around this by copying each ``MolGraph``'s arrays before
+    ``BatchMolGraph`` is constructed so every tensor owns its own memory.
+    """
+    from chemprop.data.collate import BatchMolGraph, TrainingBatch
+
+    mgs, V_ds, x_ds, ys, weights, lt_masks, gt_masks = zip(*batch)
+
+    # Deep-copy the numpy arrays inside each MolGraph so torch.from_numpy
+    # gets a stable, owned buffer instead of a CoW view.
+    safe_mgs = []
+    for mg in mgs:
+        mg.V = np.array(mg.V, copy=True)
+        mg.E = np.array(mg.E, copy=True)
+        mg.edge_index = np.array(mg.edge_index, copy=True)
+        mg.rev_edge_index = np.array(mg.rev_edge_index, copy=True)
+        safe_mgs.append(mg)
+
+    return TrainingBatch(
+        BatchMolGraph(safe_mgs),
+        None if V_ds[0] is None else torch.from_numpy(np.concatenate(V_ds)).float(),
+        None if x_ds[0] is None else torch.from_numpy(np.array(x_ds)).float(),
+        None if ys[0] is None else torch.from_numpy(np.array(ys)).float(),
+        torch.tensor(weights, dtype=torch.float).unsqueeze(1),
+        None if lt_masks[0] is None else torch.from_numpy(np.array(lt_masks)),
+        None if gt_masks[0] is None else torch.from_numpy(np.array(gt_masks)),
+    )
+
+
 def _build_loader(smiles: list[str], y: np.ndarray | None, batch_size: int, shuffle: bool):
+    from torch.utils.data import DataLoader
+
     from chemprop import data, featurizers
 
     datapoints = _build_datapoints(smiles, y)
     featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
     dataset = data.MoleculeDataset(datapoints, featurizer)
-    return data.build_dataloader(
+
+    # We bypass ``chemprop.data.build_dataloader`` so we can inject our
+    # ``_safe_collate_batch`` (see docstring above).  ``build_dataloader``
+    # hard-codes ``collate_fn`` and doesn't accept an override.
+    drop_last = len(dataset) % batch_size == 1  # matches Chemprop's auto logic
+    return DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=DEFAULT_NUM_WORKERS,
         shuffle=shuffle,
+        num_workers=DEFAULT_NUM_WORKERS,
+        collate_fn=_safe_collate_batch,
+        drop_last=drop_last,
     )
 
 
@@ -102,9 +155,21 @@ class ChempropModel:
         max_epochs: int = DEFAULT_MAX_EPOCHS,
         batch_size: int = DEFAULT_BATCH_SIZE,
         base_seed: int = 0,
+        accelerator: str | None = None,
     ) -> None:
         """Train k ensemble members. Checkpoints saved to self.checkpoint_dir."""
         import lightning.pytorch as pl
+
+        # Default accelerator: honour LOGD_CHEMPROP_ACCELERATOR env var.
+        # Default to "cpu" rather than "auto" because Chemprop's batched
+        # molecular-graph tensors trigger segfaults / silent hangs on MPS
+        # (Apple Silicon).  The root cause is a numpy/PyTorch memory
+        # corruption in BatchMolGraph collation when large drug-like
+        # molecules are moved to the MPS device.  CPU is only ~5x slower
+        # for D-MPNN training and avoids the issue entirely.
+        if accelerator is None:
+            accelerator = os.environ.get("LOGD_CHEMPROP_ACCELERATOR", "cpu")
+        LOG.info("Chemprop accelerator: %s", accelerator)
 
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.k = k
@@ -121,7 +186,7 @@ class ChempropModel:
 
             trainer = pl.Trainer(
                 max_epochs=max_epochs,
-                accelerator="auto",
+                accelerator=accelerator,
                 devices=1,
                 logger=False,
                 enable_checkpointing=False,
