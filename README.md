@@ -1,17 +1,46 @@
 # amphiphile
 
-A logD prediction service. Given a list of SMILES, returns predicted logD7.4 with an uncertainty estimate and a reliability flag per molecule. Invalid SMILES are flagged, not crashed.
+A logD prediction service built for the deepmirror take-home. Given a list of SMILES strings, it returns a predicted logD7.4 value, an uncertainty estimate, and a reliability flag for each molecule. Invalid SMILES are handled gracefully.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kirkupc/amphiphile/blob/main/notebooks/train_chemprop_colab.ipynb) ← train the Chemprop D-MPNN ensemble on a free T4 in ~20 min.
+The model is a k=5 LightGBM ensemble trained on 23,499 compounds from OpenADMET-curated ChEMBL 35 LogD data, evaluated against 5,039 held-out drug-discovery compounds from the OpenADMET ExpansionRx challenge. Uncertainty combines three complementary signals: deep-ensemble disagreement, Mondrian conformal intervals, and applicability-domain Tanimoto similarity. A second model (Chemprop v2 D-MPNN ensemble) is also included for comparison.
 
-- **Training data:** OpenADMET-curated ChEMBL 35 LogD (pinned commit SHA)
-- **External benchmark:** OpenADMET ExpansionRx challenge data on Hugging Face (5,039 real drug-discovery compounds, held out from ChEMBL)
-- **Baseline model:** LightGBM ensemble (k=5) on RDKit 2D descriptors + Morgan fingerprints
-- **Stronger model:** Chemprop v2 D-MPNN ensemble (optional, heavier)
-- **Uncertainty:** deep ensemble std + Mondrian conformal + applicability-domain Tanimoto
-- **Interfaces:** Python library, CLI (`logd`), and FastAPI service (`POST /predict`)
+The service is exposed as a Python library, a CLI (`logd`), and a FastAPI HTTP endpoint (`POST /predict`).
 
-## Quickstart — service
+## Getting started
+
+Requires Python 3.11 or 3.12 and [uv](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/kirkupc/amphiphile.git && cd amphiphile
+uv sync --extra dev
+```
+
+### Try it without retraining
+
+Pre-trained artifacts are attached to the GitHub release. Download them and run inference immediately:
+
+```bash
+mkdir -p models && cd models
+gh release download v0.1.0-baseline -R kirkupc/amphiphile
+cd ..
+uv run logd predict --smiles CCO --smiles c1ccccc1
+```
+
+Or as a Python library:
+
+```python
+from logd import load_model, predict
+
+model = load_model()
+results = predict(["CCO", "c1ccccc1", "not_a_smiles"], model=model)
+for r in results:
+    print(r)
+# Prediction(smiles='CCO',          predicted_logd=-0.31, uncertainty=0.18, reliable=True,  error=None)
+# Prediction(smiles='c1ccccc1',     predicted_logd=2.13,  uncertainty=0.22, reliable=True,  error=None)
+# Prediction(smiles='not_a_smiles', predicted_logd=None,  uncertainty=None, reliable=False, error='invalid_smiles')
+```
+
+Or as a Docker service:
 
 ```bash
 docker build -t amphiphile .
@@ -21,60 +50,25 @@ curl -X POST http://localhost:8000/predict \
      -d '{"smiles": ["CCO", "c1ccccc1", "not_a_smiles"]}'
 ```
 
-## Quickstart — library
+### Reproduce everything from scratch
 
-```python
-from logd import load_model, predict
-
-model = load_model()                              # cold-start from models/
-results = predict(["CCO", "c1ccccc1", "junk"], model=model)
-for r in results:
-    print(r)
-# Prediction(smiles='CCO',          predicted_logd=-0.31, uncertainty=0.18, reliable=True,  error=None)
-# Prediction(smiles='c1ccccc1',     predicted_logd=2.13,  uncertainty=0.22, reliable=True,  error=None)
-# Prediction(smiles='junk',         predicted_logd=None,  uncertainty=None, reliable=False, error='invalid_smiles')
-```
-
-Or via CLI:
-
-```bash
-uv run logd predict --smiles CCO --smiles c1ccccc1
-```
-
-## Install from source
-
-Requires Python 3.11 or 3.12 and [uv](https://docs.astral.sh/uv/).
-
-```bash
-uv sync --extra dev
-```
-
-## Pre-trained model (skip retraining)
-
-Reviewers who want to run inference without training first can download the baseline artifacts from the GitHub release:
-
-```bash
-mkdir -p models && cd models
-gh release download v0.1.0-baseline -R kirkupc/amphiphile
-cd ..
-uv run logd predict --smiles CCO --smiles c1ccccc1
-```
-
-Artifacts: `baseline.joblib` (94 MB, k=5 LightGBM ensemble) and `reliability.joblib` (37 MB, conformal + AD). Trained on pinned OpenADMET-curated ChEMBL 35 LogD.
-
-## Reproduce the results from scratch
+All data sources, splits, and seeds are pinned. The full pipeline takes about 10 minutes on a laptop.
 
 ```bash
 uv run logd prepare-data     # fetch + cache ChEMBL LogD + ExpansionRx (pinned SHAs)
-uv run logd train            # baseline ensemble, writes models/ + reports/metrics.json
+uv run logd train            # baseline ensemble → models/ + reports/metrics.json
 uv run logd data-quality     # intra-compound std → reports/noise_floor.{json,png}
 uv run logd error-analysis   # worst-10 compounds → reports/error_analysis/
 uv run logd profile          # batch 1/100/1k/10k → reports/profiling.json
 ```
 
-ChEMBL version, OpenADMET catalog SHA, Hugging Face dataset SHA, and all seeds are pinned in code. The whole pipeline finishes in about 10 minutes on a laptop (most of it featurisation + the 5-member ensemble training; the external-eval step is a few seconds).
+### Train the Chemprop D-MPNN ensemble (GPU)
 
-## Run tests
+The Chemprop model trains on a GPU. A Colab notebook is provided for this:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kirkupc/amphiphile/blob/main/notebooks/train_chemprop_colab.ipynb) ~20 min on a free T4.
+
+### Run tests
 
 ```bash
 make check        # ruff + mypy + pytest -m 'not slow'   (under 5 s)
