@@ -47,7 +47,20 @@ Requires Python 3.11 or 3.12 and [uv](https://docs.astral.sh/uv/).
 uv sync --extra dev
 ```
 
-## Reproduce the results
+## Pre-trained model (skip retraining)
+
+Reviewers who want to run inference without training first can download the baseline artifacts from the GitHub release:
+
+```bash
+mkdir -p models && cd models
+gh release download v0.1.0-baseline -R kirkupc/amphiphile
+cd ..
+uv run logd predict --smiles CCO --smiles c1ccccc1
+```
+
+Artifacts: `baseline.joblib` (94 MB, k=5 LightGBM ensemble) and `reliability.joblib` (37 MB, conformal + AD). Trained on pinned OpenADMET-curated ChEMBL 35 LogD.
+
+## Reproduce the results from scratch
 
 ```bash
 uv run logd prepare-data     # fetch + cache ChEMBL LogD + ExpansionRx (pinned SHAs)
@@ -57,7 +70,7 @@ uv run logd error-analysis   # worst-10 compounds → reports/error_analysis/
 uv run logd profile          # batch 1/100/1k/10k → reports/profiling.json
 ```
 
-ChEMBL version, OpenADMET catalog SHA, Hugging Face dataset SHA, and all seeds are pinned in code. The whole pipeline finishes in under 10 minutes on a laptop (most of it featurisation, which is CPU-bound single-threaded RDKit).
+ChEMBL version, OpenADMET catalog SHA, Hugging Face dataset SHA, and all seeds are pinned in code. The whole pipeline finishes in about 10 minutes on a laptop (most of it featurisation + the 5-member ensemble training; the external-eval step is a few seconds).
 
 ## Run tests
 
