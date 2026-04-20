@@ -77,9 +77,26 @@ def profile_cmd(
     batch_sizes: list[int] = typer.Option([1, 100, 1000, 10000], "--batch-size"),
     output: Path = typer.Option(Path("reports/profiling.json")),
 ) -> None:
-    """Run the inference profiler. Day-4 deliverable; stub here."""
-    typer.echo("Profiler lands Day 4 — see PLAN.md §4.")
-    typer.echo(f"(would profile batch sizes: {batch_sizes} → {output})")
+    """Profile inference pipeline across batch sizes."""
+    from scripts.profile_inference import run
+
+    run(batch_sizes=batch_sizes, output=output)
+
+
+@app.command("error-analysis")
+def error_analysis_cmd(top: int = typer.Option(10)) -> None:
+    """Worst-N compounds on ExpansionRx with structures + rationales."""
+    from scripts.error_analysis import run
+
+    run(top=top)
+
+
+@app.command("data-quality")
+def data_quality_cmd() -> None:
+    """Audit intra-compound std in ChEMBL to estimate the noise floor."""
+    from scripts.data_quality import run
+
+    run()
 
 
 if __name__ == "__main__":
