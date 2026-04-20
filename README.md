@@ -2,6 +2,8 @@
 
 A logD prediction service. Given a list of SMILES, returns predicted logD7.4 with an uncertainty estimate and a reliability flag per molecule. Invalid SMILES are flagged, not crashed.
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kirkupc/amphiphile/blob/main/notebooks/train_chemprop_colab.ipynb) ← train the Chemprop D-MPNN ensemble on a free T4 in ~20 min.
+
 - **Training data:** OpenADMET-curated ChEMBL 35 LogD (pinned commit SHA)
 - **External benchmark:** OpenADMET ExpansionRx challenge data on Hugging Face (5,039 real drug-discovery compounds, held out from ChEMBL)
 - **Baseline model:** LightGBM ensemble (k=5) on RDKit 2D descriptors + Morgan fingerprints

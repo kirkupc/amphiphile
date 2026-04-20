@@ -29,9 +29,15 @@ DEFAULT_LGBM_PARAMS: dict[str, Any] = {
     "learning_rate": 0.05,
     "num_leaves": 127,
     "min_child_samples": 10,
-    "feature_fraction": 0.9,
-    "bagging_fraction": 0.9,
-    "bagging_freq": 5,
+    # Lower fractions produce genuinely different ensemble members: each
+    # booster sees a different 70% of rows and 70% of features with a
+    # per-member bagging_seed. Without this, seed-ensembled LightGBM members
+    # converge to near-identical predictors and the ensemble std collapses
+    # (we observed Spearman(std, |err|) = 0.006 on OOD at 0.9/0.9). Diversity
+    # injected here is the standard fix.
+    "feature_fraction": 0.7,
+    "bagging_fraction": 0.7,
+    "bagging_freq": 1,
     "verbose": -1,
 }
 

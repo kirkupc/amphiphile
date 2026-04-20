@@ -34,6 +34,7 @@ build/
 
 notebooks/
 *.ipynb_checkpoints/
+!notebooks/train_chemprop_colab.ipynb
 
 .DS_Store
 .env
