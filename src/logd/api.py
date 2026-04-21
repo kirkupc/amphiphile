@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+import os
+
 from logd.inference import LoadedModel, load_model, predict
 from logd.utils import get_logger
 
@@ -26,7 +28,8 @@ if TYPE_CHECKING:
 LOG = get_logger(__name__)
 
 MAX_SMILES_PER_REQUEST = 10_000
-MODEL_VERSION = "baseline-lightgbm-ensemble-v0.1.0"
+MODEL_TYPE = os.environ.get("LOGD_MODEL", "baseline")
+MODEL_VERSION = f"{MODEL_TYPE}-v0.1.0"
 
 
 class PredictRequest(BaseModel):
@@ -58,10 +61,10 @@ _model: LoadedModel | None = None
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
     global _model
-    LOG.info("Loading model at startup")
+    LOG.info("Loading model at startup (type=%s)", MODEL_TYPE)
     try:
-        _model = load_model()
-        LOG.info("Model loaded")
+        _model = load_model(model_type=MODEL_TYPE)
+        LOG.info("Model loaded (type=%s)", MODEL_TYPE)
     except FileNotFoundError as e:
         LOG.warning("Model artifacts missing at startup: %s", e)
         _model = None

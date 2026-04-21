@@ -2,7 +2,8 @@
 
 The two functions callers should use:
 
-    model = load_model()                # cold-start from serialized artifacts
+    model = load_model()                # baseline (default)
+    model = load_model(model_type="chemprop")  # Chemprop D-MPNN
     results = predict(smiles_list, model=model)
 
 Each result is a Prediction dataclass (see below). Invalid SMILES get
@@ -14,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 
@@ -22,6 +23,9 @@ from logd.features import FeatureSpec, featurise_batch, morgan_fp, mol_from_smil
 from logd.models.baseline import BaselineModel
 from logd.uncertainty import Reliability
 from logd.utils import get_logger, models_dir
+
+if TYPE_CHECKING:
+    from logd.models.chemprop_wrap import ChempropModel
 
 LOG = get_logger(__name__)
 
@@ -42,13 +46,51 @@ class Prediction:
 class LoadedModel:
     """Opaque bundle carrying everything needed for cold-start inference."""
 
-    baseline: BaselineModel
+    baseline: BaselineModel | None
+    chemprop: "ChempropModel | None"
     reliability: Reliability
-    feature_spec: FeatureSpec
+    feature_spec: FeatureSpec | None
+    model_type: str
+
+    @property
+    def is_chemprop(self) -> bool:
+        return self.model_type == "chemprop"
 
 
-def load_model(model_path: Path | None = None, reliability_path: Path | None = None) -> LoadedModel:
-    """Load a trained model bundle. Defaults resolve to models/ in the repo."""
+def load_model(
+    model_type: str = "baseline",
+    model_path: Path | None = None,
+    reliability_path: Path | None = None,
+) -> LoadedModel:
+    """Load a trained model bundle.
+
+    model_type: "baseline" (LightGBM, default) or "chemprop" (D-MPNN).
+    """
+    if model_type == "chemprop":
+        chemprop_dir = model_path or (models_dir() / "chemprop")
+        reliability_path = reliability_path or (models_dir() / "chemprop_reliability.joblib")
+        if not (chemprop_dir / "config.json").exists():
+            raise FileNotFoundError(
+                f"Chemprop artifacts not found at {chemprop_dir}. "
+                "Download from the v0.1.0-chemprop release or train on Colab."
+            )
+        if not reliability_path.exists():
+            raise FileNotFoundError(
+                f"Chemprop reliability artifact not found at {reliability_path}."
+            )
+        from logd.models.chemprop_wrap import ChempropModel
+
+        chemprop = ChempropModel.load(chemprop_dir)
+        reliability = Reliability.load(reliability_path)
+        return LoadedModel(
+            baseline=None,
+            chemprop=chemprop,
+            reliability=reliability,
+            feature_spec=None,
+            model_type="chemprop",
+        )
+
+    # Baseline (default)
     model_path = model_path or (models_dir() / "baseline.joblib")
     reliability_path = reliability_path or (models_dir() / "reliability.joblib")
     if not model_path.exists():
@@ -64,13 +106,15 @@ def load_model(model_path: Path | None = None, reliability_path: Path | None = N
     reliability = Reliability.load(reliability_path)
     return LoadedModel(
         baseline=baseline,
+        chemprop=None,
         reliability=reliability,
         feature_spec=baseline.feature_spec,
+        model_type="baseline",
     )
 
 
 def _nn_similarity(smiles_valid: list[str], reliability: Reliability) -> np.ndarray:
-    """Morgan fp of each valid SMILES → max Tanimoto against stored training bank."""
+    """Morgan fp of each valid SMILES -> max Tanimoto against stored training bank."""
     if not smiles_valid:
         return np.zeros(0, dtype=np.float32)
     fps = np.stack([morgan_fp(mol_from_smiles(s)) for s in smiles_valid], axis=0)
@@ -91,18 +135,26 @@ def predict(
     if not smiles_list:
         return []
 
-    X, mask = featurise_batch(smiles_list, model.feature_spec)
-
     results: list[Prediction] = [
         Prediction(smiles=s, predicted_logd=None, uncertainty=None, reliable=False, error="invalid_smiles")
         for s in smiles_list
     ]
 
-    if mask.sum() == 0:
+    if model.is_chemprop:
+        assert model.chemprop is not None
+        y_pred, y_std, mask = model.chemprop.predict_smiles(smiles_list)
+        valid_smiles = [s for s, m in zip(smiles_list, mask) if m]
+    else:
+        assert model.baseline is not None and model.feature_spec is not None
+        X, mask = featurise_batch(smiles_list, model.feature_spec)
+        if mask.sum() == 0:
+            return results
+        y_pred, y_std = model.baseline.predict(X)
+        valid_smiles = [s for s, m in zip(smiles_list, mask) if m]
+
+    if not valid_smiles:
         return results
 
-    y_pred, y_std = model.baseline.predict(X)
-    valid_smiles = [s for s, m in zip(smiles_list, mask) if m]
     nn_sim = _nn_similarity(valid_smiles, model.reliability)
     flags = model.reliability.flag(y_std, nn_sim)
 

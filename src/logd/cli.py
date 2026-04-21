@@ -45,9 +45,6 @@ def train(
         metrics = train_baseline(seed=seed, k=k)
         typer.echo(json.dumps(metrics, indent=2))
     elif model == "chemprop":
-        # torch must be imported before logd.training to prevent SIGSEGV on
-        # macOS ARM.  See chemprop_wrap.py module docstring for details.
-        import torch as _torch  # noqa: F401
         from logd.training import train_chemprop
 
         metrics = train_chemprop(seed=seed, k=k)
@@ -60,6 +57,7 @@ def train(
 def predict_cmd(
     smiles: list[str] = typer.Option(None, "--smiles", help="One or more SMILES (repeatable)"),
     input_file: Path = typer.Option(None, "--input-file", help="File with one SMILES per line"),
+    model: str = typer.Option("baseline", help="baseline | chemprop"),
 ) -> None:
     """Predict logD + uncertainty + reliability. Outputs JSON lines."""
     from logd.inference import load_model, predict as run_predict
@@ -70,8 +68,8 @@ def predict_cmd(
     if not strs:
         raise typer.BadParameter("Provide --smiles or --input-file")
 
-    model = load_model()
-    for pred in run_predict(strs, model=model):
+    loaded = load_model(model_type=model)
+    for pred in run_predict(strs, model=loaded):
         typer.echo(json.dumps(pred.as_dict()))
 
 

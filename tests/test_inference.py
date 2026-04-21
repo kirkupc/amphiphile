@@ -57,7 +57,7 @@ def tiny_model() -> LoadedModel:
         std_threshold=float(np.quantile(y_val_std, 0.8)),
         tanimoto_threshold=0.2,
     )
-    return LoadedModel(baseline=model, reliability=reliability, feature_spec=spec)
+    return LoadedModel(baseline=model, chemprop=None, reliability=reliability, feature_spec=spec, model_type="baseline")
 
 
 def test_predict_returns_one_per_input(tiny_model: LoadedModel) -> None:

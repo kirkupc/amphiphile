@@ -48,7 +48,7 @@ def _tiny_model() -> LoadedModel:
     reliability = Reliability(
         conformal=conformal, ad=ad, std_threshold=1.0, tanimoto_threshold=0.1
     )
-    return LoadedModel(baseline=model, reliability=reliability, feature_spec=spec)
+    return LoadedModel(baseline=model, chemprop=None, reliability=reliability, feature_spec=spec, model_type="baseline")
 
 
 @pytest.fixture()

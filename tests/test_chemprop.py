@@ -14,11 +14,6 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-# torch must be imported before any logd module that transitively imports
-# numpy/lightgbm.  On macOS ARM + NumPy >= 2.0, late torch initialization
-# causes SIGSEGV during Chemprop's molecular-graph tensor operations.
-import torch  # noqa: F401  — must precede logd imports
-
 import numpy as np
 import pytest
 
