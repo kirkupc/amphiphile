@@ -45,6 +45,9 @@ def train(
         metrics = train_baseline(seed=seed, k=k)
         typer.echo(json.dumps(metrics, indent=2))
     elif model == "chemprop":
+        # torch must be imported before logd.training to prevent SIGSEGV on
+        # macOS ARM.  See chemprop_wrap.py module docstring for details.
+        import torch as _torch  # noqa: F401
         from logd.training import train_chemprop
 
         metrics = train_chemprop(seed=seed, k=k)

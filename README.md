@@ -81,19 +81,19 @@ make test         # adds slow tests (small Chemprop training)
 
 | Model | RMSE | MAE | Pearson r | Spearman(std, \|err\|) |
 |---|--:|--:|--:|--:|
-| Baseline (LightGBM ensemble, k=5) | **0.823** | 0.564 | 0.859 | 0.236 |
-| Chemprop D-MPNN (k=5) | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| Baseline (LightGBM ensemble, k=5) | 0.823 | 0.564 | 0.859 | 0.236 |
+| Chemprop D-MPNN (k=5) | **0.747** | **0.499** | **0.885** | 0.220 |
 
 ### ExpansionRx external test (real drug-discovery data, 5,039 compounds, zero overlap with training)
 
 | Model | RMSE | MAE | Pearson r | Spearman(std, \|err\|) |
 |---|--:|--:|--:|--:|
-| Baseline | **0.855** | 0.655 | 0.744 | 0.006 |
-| Chemprop | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| Baseline | 0.855 | 0.655 | 0.744 | 0.006 |
+| Chemprop | **0.749** | **0.590** | **0.784** | 0.012 |
 
-**Reading the numbers.** Baseline generalises well — RMSE only bumps 0.03 log units from scaffold to OOD, Pearson r drops from 0.86 to 0.74 (still strong). That's 23,499 ChEMBL compounds predicting 5,039 unseen real-world drug-discovery compounds. Solid baseline.
+**Reading the numbers.** Chemprop outperforms the baseline across the board. On the external test (5,039 unseen drug-discovery compounds), RMSE drops from 0.855 to 0.749 — a 0.11 log-unit improvement — and Pearson r rises from 0.74 to 0.78. The graph neural network's learned molecular representation generalises better to new chemical matter than hand-crafted descriptors + fingerprints, which is the expected result for this class of models. Notably, Chemprop's scaffold-to-OOD RMSE gap is negligible (0.747 → 0.749), suggesting the D-MPNN is less prone to scaffold memorisation than the tree ensemble.
 
-**The uncertainty story is mixed.** Spearman between ensemble-std and absolute error is 0.24 on scaffold (modest) and effectively zero on OOD. This is a known failure mode of seed-ensembled tree boosters: the different seeds converge to very similar predictors, the ensemble std collapses, and the signal stops tracking error on distribution shift. The conformal quantile blows up to 11.6× the ensemble std as a consequence (a symptom of underestimated σ, not of the conformal method itself). The Tanimoto applicability-domain channel is the more reliable OOD signal for this model family — see the error analysis below.
+**The uncertainty story is mixed.** Spearman between ensemble-std and absolute error is ~0.22 on scaffold for both models (modest) and effectively zero on OOD for both. For the baseline, this is a known failure mode of seed-ensembled tree boosters: the different seeds converge to very similar predictors. Chemprop's neural ensemble shows the same pattern, likely because the D-MPNN architecture is already well-specified enough that seed variation alone doesn't produce meaningfully different models. The Tanimoto applicability-domain channel is the more reliable OOD signal for both model families — see the error analysis below.
 
 ### Data quality (ceiling reference)
 

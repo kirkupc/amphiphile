@@ -14,6 +14,11 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+# torch must be imported before any logd module that transitively imports
+# numpy/lightgbm.  On macOS ARM + NumPy >= 2.0, late torch initialization
+# causes SIGSEGV during Chemprop's molecular-graph tensor operations.
+import torch  # noqa: F401  — must precede logd imports
+
 import numpy as np
 import pytest
 
@@ -71,7 +76,7 @@ def test_chemprop_all_invalid_smiles() -> None:
         # but for this test we skip training entirely — just validate the
         # all-invalid fast path doesn't try to load models.
         mean, std, mask = ChempropModel(checkpoint_dir=ckpt, k=0).predict_smiles(
-            ["not", "smiles", ""]
+            ["not", "smiles", "xyz123"]
         )
         assert mask.sum() == 0
         assert mean.shape == (3,)

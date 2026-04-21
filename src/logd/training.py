@@ -12,16 +12,6 @@ from pathlib import Path
 
 import numpy as np
 
-from logd.data import expansionrx, openadmet_chembl, splits
-from logd.features import FeatureSpec, featurise_batch, morgan_fp, mol_from_smiles
-from logd.models.baseline import train_ensemble
-from logd.models.chemprop_wrap import ChempropModel
-from logd.uncertainty import (
-    ApplicabilityDomain,
-    ConformalCalibrator,
-    Reliability,
-    calibrate_thresholds,
-)
 from logd.utils import get_logger, models_dir, reports_dir, set_seed
 
 LOG = get_logger(__name__)
@@ -50,6 +40,16 @@ def _spearman(a: np.ndarray, b: np.ndarray) -> float:
 
 def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1) -> dict:
     """Full Day-1 pipeline. Returns metrics dict, writes artifacts to models/."""
+    from logd.data import expansionrx, openadmet_chembl, splits
+    from logd.features import FeatureSpec, featurise_batch, morgan_fp, mol_from_smiles
+    from logd.models.baseline import train_ensemble
+    from logd.uncertainty import (
+        ApplicabilityDomain,
+        ConformalCalibrator,
+        Reliability,
+        calibrate_thresholds,
+    )
+
     set_seed(seed)
 
     LOG.info("Loading OpenADMET ChEMBL35 logD data")
@@ -180,7 +180,7 @@ def train_chemprop(
     k: int = 5,
     alpha: float = 0.1,
     max_epochs: int = 50,
-    batch_size: int = 64,
+    batch_size: int = 32,
 ) -> dict:
     """Full Chemprop D-MPNN training pipeline.
 
@@ -188,6 +188,26 @@ def train_chemprop(
     same OpenADMET external test) so results are directly comparable. The only
     difference is the model family.
     """
+    # On macOS ARM with NumPy >= 2.0, torch must be imported before any large
+    # numpy arrays are allocated (e.g. by openadmet_chembl.load()).  Importing
+    # torch here — before data loading — ensures the torch/numpy memory
+    # allocator hook is installed early enough to prevent SIGSEGV during
+    # Chemprop's molecular-graph batch collation and forward pass.
+    #
+    # IMPORTANT: ``import torch`` must appear BEFORE any import that
+    # transitively loads lightgbm or creates large numpy arrays.
+    import torch as _torch  # noqa: F401
+    from logd.models.chemprop_wrap import ChempropModel
+
+    from logd.data import expansionrx, openadmet_chembl, splits
+    from logd.features import morgan_fp, mol_from_smiles
+    from logd.uncertainty import (
+        ApplicabilityDomain,
+        ConformalCalibrator,
+        Reliability,
+        calibrate_thresholds,
+    )
+
     set_seed(seed)
 
     LOG.info("Loading OpenADMET ChEMBL35 logD data")
