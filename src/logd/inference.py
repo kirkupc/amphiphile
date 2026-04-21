@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 import numpy as np
 
@@ -38,7 +38,7 @@ class Prediction:
     reliable: bool
     error: str | None
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -113,11 +113,23 @@ def load_model(
     )
 
 
-def _nn_similarity(smiles_valid: list[str], reliability: Reliability) -> np.ndarray:
-    """Morgan fp of each valid SMILES -> max Tanimoto against stored training bank."""
+def _nn_similarity(smiles_valid: list[str], reliability: Reliability) -> "np.ndarray[Any, np.dtype[np.float32]]":
+    """Morgan fp of each valid SMILES -> max Tanimoto against stored training bank.
+
+    If a SMILES passes the upstream validity mask but fails salt-stripping here
+    (e.g. counter-ion-only entries), it gets similarity 0.0 (maximally out of
+    domain) rather than crashing.
+    """
     if not smiles_valid:
         return np.zeros(0, dtype=np.float32)
-    fps = np.stack([morgan_fp(mol_from_smiles(s)) for s in smiles_valid], axis=0)
+    fps_list = []
+    for s in smiles_valid:
+        mol = mol_from_smiles(s)
+        if mol is None:
+            fps_list.append(np.zeros(2048, dtype=np.uint8))
+        else:
+            fps_list.append(morgan_fp(mol))
+    fps = np.stack(fps_list, axis=0)
     return reliability.ad.nearest_similarity(fps)
 
 
