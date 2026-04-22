@@ -11,13 +11,12 @@ Or via Docker: `docker run -p 8000:8000 amphiphile`
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-
-import os
 
 from logd.inference import LoadedModel, load_model, predict
 from logd.utils import get_logger
@@ -59,7 +58,7 @@ _model: LoadedModel | None = None
 
 
 @asynccontextmanager
-async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     global _model
     LOG.info("Loading model at startup (type=%s)", MODEL_TYPE)
     try:

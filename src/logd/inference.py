@@ -13,13 +13,14 @@ pre-filter.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from logd.features import FeatureSpec, featurise_batch, morgan_fp, mol_from_smiles
+from logd.features import FeatureSpec, featurise_batch, mol_from_smiles, morgan_fp
 from logd.models.baseline import BaselineModel
 from logd.uncertainty import Reliability
 from logd.utils import get_logger, models_dir
@@ -47,7 +48,7 @@ class LoadedModel:
     """Opaque bundle carrying everything needed for cold-start inference."""
 
     baseline: BaselineModel | None
-    chemprop: "ChempropModel | None"
+    chemprop: ChempropModel | None
     reliability: Reliability
     feature_spec: FeatureSpec | None
     model_type: str
@@ -113,7 +114,9 @@ def load_model(
     )
 
 
-def _nn_similarity(smiles_valid: list[str], reliability: Reliability) -> "np.ndarray[Any, np.dtype[np.float32]]":
+def _nn_similarity(
+    smiles_valid: list[str], reliability: Reliability
+) -> np.ndarray[Any, np.dtype[np.float32]]:
     """Morgan fp of each valid SMILES -> max Tanimoto against stored training bank.
 
     If a SMILES passes the upstream validity mask but fails salt-stripping here
@@ -133,9 +136,7 @@ def _nn_similarity(smiles_valid: list[str], reliability: Reliability) -> "np.nda
     return reliability.ad.nearest_similarity(fps)
 
 
-def predict(
-    smiles: Iterable[str], model: LoadedModel | None = None
-) -> list[Prediction]:
+def predict(smiles: Iterable[str], model: LoadedModel | None = None) -> list[Prediction]:
     """Predict logD + uncertainty + reliability for a batch of SMILES.
 
     Order-preserving: returns one Prediction per input SMILES.
@@ -148,21 +149,23 @@ def predict(
         return []
 
     results: list[Prediction] = [
-        Prediction(smiles=s, predicted_logd=None, uncertainty=None, reliable=False, error="invalid_smiles")
+        Prediction(
+            smiles=s, predicted_logd=None, uncertainty=None, reliable=False, error="invalid_smiles"
+        )
         for s in smiles_list
     ]
 
     if model.is_chemprop:
         assert model.chemprop is not None
         y_pred, y_std, mask = model.chemprop.predict_smiles(smiles_list)
-        valid_smiles = [s for s, m in zip(smiles_list, mask) if m]
+        valid_smiles = [s for s, m in zip(smiles_list, mask, strict=True) if m]
     else:
         assert model.baseline is not None and model.feature_spec is not None
         X, mask = featurise_batch(smiles_list, model.feature_spec)
         if mask.sum() == 0:
             return results
         y_pred, y_std = model.baseline.predict(X)
-        valid_smiles = [s for s, m in zip(smiles_list, mask) if m]
+        valid_smiles = [s for s, m in zip(smiles_list, mask, strict=True) if m]
 
     if not valid_smiles:
         return results

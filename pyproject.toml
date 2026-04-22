@@ -63,9 +63,28 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]
+ignore = [
+    "E501",
+    "N806",   # X is standard ML convention for feature matrices
+    "N803",   # same for function arguments
+    "RUF002", # unicode in docstrings (mathematical symbols)
+    "RUF003", # same
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/logd/cli.py" = ["B008"]  # typer.Option() in defaults is the standard pattern
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+# numpy generic ndarray typing is impractical in scientific code
+disable_error_code = ["type-arg"]
+explicit_package_bases = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["logd.features", "logd.data.*", "scripts.*"]
+# RDKit and other cheminformatics libs lack type stubs
+disallow_untyped_calls = false
+warn_return_any = false

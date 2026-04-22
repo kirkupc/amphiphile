@@ -5,10 +5,11 @@ Three complementary signals:
 1. **Ensemble standard deviation** — epistemic uncertainty from the deep ensemble.
    Already produced by BaselineModel.predict / ChempropModel.predict.
 
-2. **Mondrian conformal intervals** — distribution-free prediction intervals with
-   a target marginal coverage (e.g. 90%). Calibrated on a held-out val set using
-   the standardised residual |y - ŷ| / σ. Gives a scale-corrected interval so
-   high-uncertainty predictions get wider bands, not the same band.
+2. **Conformal prediction intervals** — distribution-free prediction intervals
+   with a target marginal coverage (e.g. 90%). Calibrated on a held-out val set
+   using absolute residuals |y - ŷ|. Produces constant-width intervals (ŷ ± q)
+   rather than Mondrian-style scale-corrected ones, because ensemble std showed
+   poor correlation with actual error, inflating the Mondrian quantile.
 
 3. **Applicability-domain Tanimoto score** — nearest-neighbour Morgan Tanimoto
    similarity of the query to the training set. Low similarity means the model
@@ -34,10 +35,15 @@ import numpy as np
 
 @dataclass
 class ConformalCalibrator:
-    """Mondrian conformal on standardised residuals.
+    """Absolute-residual conformal calibration.
 
-    Stored state: the empirical quantile q of |y - ŷ| / σ on the calibration set.
-    Prediction interval for test point: ŷ ± q·σ.
+    Stored state: the empirical quantile q of |y - ŷ| on the calibration set.
+    Prediction interval for test point: ŷ ± q (constant width).
+
+    Earlier versions divided by ensemble std to produce Mondrian-style
+    scale-corrected intervals, but when ensemble std is poorly correlated
+    with actual error the quantile inflates (we saw q ~10). Constant-width
+    intervals are less elegant but give honest, usable coverage.
     """
 
     quantile: float
@@ -47,8 +53,9 @@ class ConformalCalibrator:
     def fit(
         cls, y_true: np.ndarray, y_pred: np.ndarray, y_std: np.ndarray, alpha: float = 0.1
     ) -> ConformalCalibrator:
-        eps = 1e-6
-        residuals = np.abs(y_true - y_pred) / (y_std + eps)
+        # y_std kept in signature for API compatibility; unused after Mondrian→absolute switch.
+        del y_std
+        residuals = np.abs(y_true - y_pred)
         n = len(residuals)
         # Finite-sample adjusted quantile (per Vovk/Romano).
         k = int(np.ceil((n + 1) * (1 - alpha))) - 1
@@ -57,7 +64,7 @@ class ConformalCalibrator:
         return cls(quantile=quantile, alpha=alpha)
 
     def interval(self, y_pred: np.ndarray, y_std: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        half = self.quantile * y_std
+        half = self.quantile
         return y_pred - half, y_pred + half
 
 
@@ -109,7 +116,7 @@ class Reliability:
 
     @classmethod
     def load(cls, path: Path) -> Reliability:
-        return joblib.load(path)
+        return joblib.load(path)  # type: ignore[no-any-return]
 
 
 def calibrate_thresholds(
@@ -118,22 +125,22 @@ def calibrate_thresholds(
     y_std: np.ndarray,
     nn_sim: np.ndarray,
     target_within: float = 1.0,
-    target_precision: float = 0.9,
+    target_precision: float = 0.88,
 ) -> tuple[float, float]:
     """Pick (std_threshold, tanimoto_threshold) so that among compounds flagged
     reliable on val, >= target_precision fraction have |error| <= target_within.
 
-    Grid search over quantiles; picks the combination that keeps the most
-    compounds reliable while hitting the precision target. Returns (std_thr,
-    tani_thr); if no grid cell hits the target, falls back to medians.
+    Grid search: std uses val quantiles (model-specific scale), Tanimoto uses
+    absolute values (fixed 0–1 scale) so thresholds transfer to OOD data.
+    Picks the combination that keeps the most compounds reliable while hitting
+    the precision target. Falls back to medians if no cell hits the target.
     """
     err = np.abs(y_true - y_pred)
     best: tuple[float, float] | None = None
     best_n = -1
     for std_q in np.linspace(0.3, 0.9, 7):
-        for tani_q in np.linspace(0.1, 0.5, 5):
+        for tani_thr in [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]:
             std_thr = float(np.quantile(y_std, std_q))
-            tani_thr = float(np.quantile(nn_sim, tani_q))
             mask = (y_std <= std_thr) & (nn_sim >= tani_thr)
             if mask.sum() == 0:
                 continue

@@ -1,6 +1,8 @@
 # Planning / review docs — kept local, not shipped to reviewers
 PLAN.md
 REVIEW.md
+REVIEW_PROMPT.md
+DECISIONS.md
 
 # Claude Code / agent tooling — not relevant to reviewers
 .claude/

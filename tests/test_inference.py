@@ -18,14 +18,31 @@ from logd.inference import LoadedModel, predict
 from logd.models.baseline import BaselineModel, train_ensemble
 from logd.uncertainty import ApplicabilityDomain, ConformalCalibrator, Reliability
 
-
 TRAIN_SMILES = [
-    "CCO", "CCC", "CCCC", "CCCCC", "CCCCCC",
-    "c1ccccc1", "c1ccc(C)cc1", "c1ccc(CC)cc1", "c1ccc(CCC)cc1",
-    "CC(=O)O", "CC(=O)OC", "CC(=O)N", "C(=O)O",
-    "c1ccncc1", "c1ccncc1C", "C1CCCCC1", "C1CCCCC1C", "C1CCCCC1CC",
-    "CCN", "CCCN", "CCCCN",
-    "OCC(O)CO", "OCC(O)C", "OCCO",
+    "CCO",
+    "CCC",
+    "CCCC",
+    "CCCCC",
+    "CCCCCC",
+    "c1ccccc1",
+    "c1ccc(C)cc1",
+    "c1ccc(CC)cc1",
+    "c1ccc(CCC)cc1",
+    "CC(=O)O",
+    "CC(=O)OC",
+    "CC(=O)N",
+    "C(=O)O",
+    "c1ccncc1",
+    "c1ccncc1C",
+    "C1CCCCC1",
+    "C1CCCCC1C",
+    "C1CCCCC1CC",
+    "CCN",
+    "CCCN",
+    "CCCCN",
+    "OCC(O)CO",
+    "OCC(O)C",
+    "OCCO",
 ]
 TRAIN_Y = np.linspace(-1.5, 3.5, len(TRAIN_SMILES)).astype(np.float32)
 
@@ -57,7 +74,13 @@ def tiny_model() -> LoadedModel:
         std_threshold=float(np.quantile(y_val_std, 0.8)),
         tanimoto_threshold=0.2,
     )
-    return LoadedModel(baseline=model, chemprop=None, reliability=reliability, feature_spec=spec, model_type="baseline")
+    return LoadedModel(
+        baseline=model,
+        chemprop=None,
+        reliability=reliability,
+        feature_spec=spec,
+        model_type="baseline",
+    )
 
 
 def test_predict_returns_one_per_input(tiny_model: LoadedModel) -> None:
@@ -86,7 +109,7 @@ def test_predict_canonical_equivalence(tiny_model: LoadedModel) -> None:
 def test_predict_batch_matches_single(tiny_model: LoadedModel) -> None:
     single = [predict([s], model=tiny_model)[0] for s in ["CCO", "c1ccccc1", "CC(=O)O"]]
     batch = predict(["CCO", "c1ccccc1", "CC(=O)O"], model=tiny_model)
-    for a, b in zip(single, batch):
+    for a, b in zip(single, batch, strict=True):
         assert a.predicted_logd == pytest.approx(b.predicted_logd)
 
 

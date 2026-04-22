@@ -19,13 +19,31 @@ import pytest
 
 from logd.models.chemprop_wrap import ChempropModel
 
-
 TRAIN_SMILES = [
-    "CCO", "CCC", "CCCC", "CCCCC", "CCCCCC", "CCCCCCC",
-    "c1ccccc1", "c1ccc(C)cc1", "c1ccc(CC)cc1", "c1ccc(CCC)cc1",
-    "CC(=O)O", "CC(=O)OC", "CC(=O)N", "C(=O)O",
-    "c1ccncc1", "c1ccncc1C", "C1CCCCC1", "C1CCCCC1C",
-    "CCN", "CCCN", "OCC(O)CO", "OCCO", "CCS", "CCSC",
+    "CCO",
+    "CCC",
+    "CCCC",
+    "CCCCC",
+    "CCCCCC",
+    "CCCCCCC",
+    "c1ccccc1",
+    "c1ccc(C)cc1",
+    "c1ccc(CC)cc1",
+    "c1ccc(CCC)cc1",
+    "CC(=O)O",
+    "CC(=O)OC",
+    "CC(=O)N",
+    "C(=O)O",
+    "c1ccncc1",
+    "c1ccncc1C",
+    "C1CCCCC1",
+    "C1CCCCC1C",
+    "CCN",
+    "CCCN",
+    "OCC(O)CO",
+    "OCCO",
+    "CCS",
+    "CCSC",
 ]
 TRAIN_Y = np.linspace(-1.5, 3.5, len(TRAIN_SMILES)).astype(np.float32)
 VAL_SMILES = TRAIN_SMILES[:4]
@@ -56,7 +74,7 @@ def test_chemprop_train_predict_roundtrip() -> None:
 
         # Load from disk and confirm deterministic predictions
         loaded = ChempropModel.load(ckpt)
-        mean2, std2, mask2 = loaded.predict_smiles(["CCO", "c1ccccc1"])
+        mean2, std2, _mask2 = loaded.predict_smiles(["CCO", "c1ccccc1"])
         np.testing.assert_allclose(mean, mean2, atol=1e-5)
         np.testing.assert_allclose(std, std2, atol=1e-5)
 
@@ -66,7 +84,7 @@ def test_chemprop_all_invalid_smiles() -> None:
     """When nothing is parseable, return zero arrays with a false mask."""
     with tempfile.TemporaryDirectory() as td:
         ckpt = Path(td) / "chemprop"
-        model = ChempropModel(checkpoint_dir=ckpt, k=2)
+        ChempropModel(checkpoint_dir=ckpt, k=2)
         # Write minimal config so ChempropModel.load would succeed later,
         # but for this test we skip training entirely — just validate the
         # all-invalid fast path doesn't try to load models.

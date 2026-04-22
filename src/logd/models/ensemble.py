@@ -20,13 +20,11 @@ import numpy as np
 class EnsemblePredictor(Protocol):
     """What inference.py expects from any trained model artifact."""
 
-    def predict_smiles(
-        self, smiles: list[str]
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def predict_smiles(self, smiles: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Returns (mean_logd, std_logd, valid_mask). All length n = len(smiles)."""
         ...
 
     def save(self, path: Path) -> None: ...
 
     @classmethod
-    def load(cls, path: Path) -> "EnsemblePredictor": ...
+    def load(cls, path: Path) -> EnsemblePredictor: ...

@@ -16,13 +16,27 @@ from logd.inference import LoadedModel, predict
 from logd.models.baseline import train_ensemble
 from logd.uncertainty import ApplicabilityDomain, ConformalCalibrator, Reliability
 
-
 TRAIN_SMILES = [
-    "CCO", "CCC", "CCCC", "CCCCC", "CCCCCC",
-    "c1ccccc1", "c1ccc(C)cc1", "c1ccc(CC)cc1",
-    "CC(=O)O", "CC(=O)OC", "CC(=O)N",
-    "c1ccncc1", "C1CCCCC1", "C1CCCCC1C",
-    "CCN", "CCCN", "OCC(O)CO", "OCCO", "CCS", "CCSC",
+    "CCO",
+    "CCC",
+    "CCCC",
+    "CCCCC",
+    "CCCCCC",
+    "c1ccccc1",
+    "c1ccc(C)cc1",
+    "c1ccc(CC)cc1",
+    "CC(=O)O",
+    "CC(=O)OC",
+    "CC(=O)N",
+    "c1ccncc1",
+    "C1CCCCC1",
+    "C1CCCCC1C",
+    "CCN",
+    "CCCN",
+    "OCC(O)CO",
+    "OCCO",
+    "CCS",
+    "CCSC",
 ]
 TRAIN_Y = np.linspace(-1.5, 3.5, len(TRAIN_SMILES)).astype(np.float32)
 
@@ -30,7 +44,7 @@ TRAIN_Y = np.linspace(-1.5, 3.5, len(TRAIN_SMILES)).astype(np.float32)
 @pytest.fixture(scope="module")
 def tiny_model() -> LoadedModel:
     spec = FeatureSpec()
-    X, mask = featurise_batch(TRAIN_SMILES, spec)
+    X, _mask = featurise_batch(TRAIN_SMILES, spec)
     n_val = 4
     model = train_ensemble(
         X_train=X[:-n_val],
@@ -45,10 +59,14 @@ def tiny_model() -> LoadedModel:
     ad = ApplicabilityDomain(train_fps=train_fps)
     y_val_pred, y_val_std = model.predict(X[-n_val:])
     conformal = ConformalCalibrator.fit(TRAIN_Y[-n_val:], y_val_pred, y_val_std, alpha=0.1)
-    reliability = Reliability(
-        conformal=conformal, ad=ad, std_threshold=1.0, tanimoto_threshold=0.1
+    reliability = Reliability(conformal=conformal, ad=ad, std_threshold=1.0, tanimoto_threshold=0.1)
+    return LoadedModel(
+        baseline=model,
+        chemprop=None,
+        reliability=reliability,
+        feature_spec=spec,
+        model_type="baseline",
     )
-    return LoadedModel(baseline=model, chemprop=None, reliability=reliability, feature_spec=spec, model_type="baseline")
 
 
 def test_empty_string(tiny_model: LoadedModel) -> None:

@@ -28,7 +28,7 @@ from rdkit import Chem
 from rdkit.Chem import Draw
 
 from logd.data import expansionrx
-from logd.features import FeatureSpec, featurise_batch, mol_from_smiles, morgan_fp
+from logd.features import featurise_batch, mol_from_smiles, morgan_fp
 from logd.inference import load_model
 from logd.utils import get_logger, reports_dir
 
@@ -38,9 +38,9 @@ LOG = get_logger(__name__)
 def _rationalise(row: dict) -> str:
     """Heuristic chemistry rationale for a failure case.
 
-    Chooses a plausible reason from structural features. Intentionally
-    heuristic — the review narrative will refine these by hand during
-    writeup. This is scaffolding, not ground truth.
+    Pattern-matches on structural features known to cause logD prediction
+    failures: ionisable groups (amidines, guanidines, quaternary N),
+    size extremes, unusual atoms, flexibility, and AD/uncertainty signals.
     """
     mol = Chem.MolFromSmiles(row["smiles"])
     if mol is None:
@@ -51,17 +51,64 @@ def _rationalise(row: dict) -> str:
     # Size
     n_heavy = mol.GetNumHeavyAtoms()
     if n_heavy > 50:
-        reasons.append(f"large molecule ({n_heavy} heavy atoms) — outside typical training mass range")
+        reasons.append(
+            f"large molecule ({n_heavy} heavy atoms) — outside typical training mass range"
+        )
     elif n_heavy < 6:
         reasons.append(f"very small molecule ({n_heavy} heavy atoms) — sparse graph features")
 
     # Charge / ionizability proxy
     has_cooh = mol.HasSubstructMatch(Chem.MolFromSmarts("C(=O)[OH]"))
     has_amine = mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3;H2,H1;!$(NC=O)]"))
+    has_quat_n = mol.HasSubstructMatch(Chem.MolFromSmarts("[N+;!$([N+]-[O-])]"))
+    has_amidine = mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3][CX3]=[NX2]"))
+    has_guanidine = mol.HasSubstructMatch(Chem.MolFromSmarts("[NX3][CX3](=[NX2])[NX3]"))
+    pyridine_n_pat = Chem.MolFromSmarts("[nR1;H0]")
+    aminopyrimidine_pat = Chem.MolFromSmarts("[NX3][cR1]1[nR1][cR1][nR1][cR1][cR1]1")
+    n_pyridine_n = len(mol.GetSubstructMatches(pyridine_n_pat)) if pyridine_n_pat else 0
+    has_aminopyrimidine = (
+        bool(mol.HasSubstructMatch(aminopyrimidine_pat)) if aminopyrimidine_pat else False
+    )
+
+    if has_quat_n:
+        reasons.append(
+            "permanent positive charge (quaternary nitrogen) — logD is dominated by the ionic species "
+            "at pH 7.4; the model counts this group but lacks the pKa magnitude to quantify the shift"
+        )
+    if has_guanidine:
+        reasons.append(
+            "guanidine group (pKa ~12-13, fully protonated at pH 7.4) — the cationic form dominates "
+            "partitioning; the model counts this group but lacks pKa-derived features to quantify the logD shift"
+        )
+    elif has_amidine:
+        reasons.append(
+            "amidine group (pKa ~10-11, protonated at pH 7.4) — the cationic form dominates "
+            "partitioning; the model counts this group but lacks pKa-derived features to quantify the logD shift"
+        )
+    if has_aminopyrimidine:
+        reasons.append(
+            "aminopyrimidine group (pKa ~4-6) — weakly basic heterocyclic nitrogen, "
+            "individually not strongly ionised at pH 7.4 but multiple instances shift the protonation equilibrium"
+        )
+    elif n_pyridine_n > 0:
+        qualifier = f"multiple ({n_pyridine_n}) " if n_pyridine_n > 1 else ""
+        reasons.append(
+            f"{qualifier}aromatic basic nitrogen(s) (pKa ~3-5) — weakly basic heterocyclic nitrogens, "
+            "individually not strongly ionised at pH 7.4 but multiple instances shift the protonation equilibrium"
+        )
     if has_cooh and has_amine:
-        reasons.append("zwitterionic potential (both carboxylic acid and basic amine) — pH-dependent partitioning")
+        reasons.append(
+            "zwitterionic potential (both carboxylic acid and basic amine) — pH-dependent partitioning"
+        )
     elif has_cooh:
-        reasons.append("carboxylic acid — ionises at pH 7.4, models assuming neutral form under-predict logD")
+        reasons.append(
+            "carboxylic acid — ionises at pH 7.4, models assuming neutral form under-predict logD"
+        )
+    elif has_amine and not (has_amidine or has_guanidine or has_quat_n):
+        reasons.append(
+            "basic amine (pKa ~9-10, protonated at pH 7.4) — the model counts this group "
+            "but lacks pKa-derived features to quantify the logD shift from ionisation"
+        )
 
     # Unusual atoms
     atoms = {a.GetSymbol() for a in mol.GetAtoms()}
@@ -72,7 +119,7 @@ def _rationalise(row: dict) -> str:
     # Rotatable bonds as flexibility proxy
     from rdkit.Chem import Descriptors
 
-    n_rot = int(Descriptors.NumRotatableBonds(mol))
+    n_rot = int(Descriptors.NumRotatableBonds(mol))  # type: ignore[attr-defined]
     if n_rot > 12:
         reasons.append(f"highly flexible ({n_rot} rotatable bonds) — conformationally demanding")
 
@@ -90,8 +137,8 @@ def _rationalise(row: dict) -> str:
 
     if not reasons:
         reasons.append(
-            "no obvious structural outlier; this is a silent failure — high error but "
-            "all uncertainty channels reported confidence. Worth investigating the train distribution."
+            "no obvious structural explanation from heuristic analysis — "
+            "manual inspection of the training distribution around this scaffold is recommended"
         )
 
     return ". ".join(r.capitalize() if i == 0 else r for i, r in enumerate(reasons)) + "."
@@ -108,31 +155,37 @@ def run(top: int = 10, out_dir: Path | None = None) -> None:
     y_true = eval_df["logd"].to_numpy()
 
     LOG.info("Featurising %d test compounds", len(smiles))
+    assert model.feature_spec is not None and model.baseline is not None
     X, mask = featurise_batch(smiles, model.feature_spec)
     y_pred, y_std = model.baseline.predict(X)
-    valid_smiles = [s for s, m in zip(smiles, mask) if m]
-    fps = np.stack([morgan_fp(mol_from_smiles(s)) for s in valid_smiles], axis=0)
+    valid_smiles = [s for s, m in zip(smiles, mask, strict=True) if m]
+    fps = np.stack([morgan_fp(mol_from_smiles(s)) for s in valid_smiles], axis=0)  # type: ignore[arg-type]
     nn = model.reliability.ad.nearest_similarity(fps)
 
-    # Conformal interval half-width per compound
+    # Conformal interval half-width (constant after switch to absolute residuals)
     conformal = model.reliability.conformal
-    half_width = conformal.quantile * y_std
+    half_width = np.full_like(y_std, conformal.quantile)
 
     err = np.abs(y_true[mask] - y_pred)
     median_std = float(np.median(y_std))
 
-    df = pd.DataFrame(
-        {
-            "smiles": valid_smiles,
-            "true_logd": y_true[mask],
-            "pred_logd": y_pred,
-            "abs_error": err,
-            "ensemble_std": y_std,
-            "nn_tanimoto": nn,
-            "conformal_halfwidth": half_width,
-            "median_std": median_std,
-        }
-    ).sort_values("abs_error", ascending=False).head(top).reset_index(drop=True)
+    df = (
+        pd.DataFrame(
+            {
+                "smiles": valid_smiles,
+                "true_logd": y_true[mask],
+                "pred_logd": y_pred,
+                "abs_error": err,
+                "ensemble_std": y_std,
+                "nn_tanimoto": nn,
+                "conformal_halfwidth": half_width,
+                "median_std": median_std,
+            }
+        )
+        .sort_values("abs_error", ascending=False)
+        .head(top)
+        .reset_index(drop=True)
+    )
 
     # Render structures
     LOG.info("Rendering %d structures", len(df))
@@ -141,7 +194,7 @@ def run(top: int = 10, out_dir: Path | None = None) -> None:
         if mol is None:
             continue
         img = Draw.MolToImage(mol, size=(500, 400))
-        img.save(out_dir / f"worst_{i+1:02d}.png")
+        img.save(out_dir / f"worst_{i + 1:02d}.png")
 
     # Uncertainty-channel classification
     std_thr = model.reliability.std_threshold
@@ -153,17 +206,32 @@ def run(top: int = 10, out_dir: Path | None = None) -> None:
     loud = int(df["would_be_flagged_unreliable"].sum())
     silent = len(df) - loud
 
+    # Full-dataset reliability coverage
+    all_reliable = (y_std <= std_thr) & (nn >= tani_thr)
+    n_reliable = int(all_reliable.sum())
+    n_total = len(y_std)
+    reliable_err = err[all_reliable]
+    reliable_precision = float((reliable_err <= 1.0).mean()) if n_reliable > 0 else float("nan")
+    full_rmse = float(np.sqrt(np.mean(err**2)))
+    reliable_rmse = float(np.sqrt(np.mean(reliable_err**2))) if n_reliable > 0 else float("nan")
+
     # Markdown report
     report = [
         f"# Error analysis — worst {top} predictions on ExpansionRx\n",
+        "## Reliability coverage (full test set)\n",
+        f"- Total valid compounds: {n_total}",
+        f"- Flagged reliable: {n_reliable} ({100 * n_reliable / n_total:.1f}%)",
+        f"- Precision on reliable subset (|error| <= 1.0 log unit): {reliable_precision:.1%}",
+        f"- RMSE overall: {full_rmse:.3f}, RMSE on reliable subset: {reliable_rmse:.3f}\n",
+        f"## Worst-{top} analysis\n",
         f"- Median ensemble std across full test: {median_std:.3f} log units",
-        f"- Reliability thresholds: std ≤ {std_thr:.3f}, Tanimoto ≥ {tani_thr:.3f}",
-        f"- Of the worst {top}: **{loud} would have been flagged unreliable** (loud), **{silent} silent failures**\n",
+        f"- Reliability thresholds: std <= {std_thr:.3f}, Tanimoto >= {tani_thr:.3f}",
+        f"- Of the worst {top}: **{loud}/{top} would have been flagged unreliable** (loud), **{silent} silent failures**\n",
         "## Per-compound breakdown\n",
     ]
     for i, row in df.iterrows():
-        report.append(f"### {i+1}. abs_error = {row['abs_error']:.2f} log units\n")
-        report.append(f"![structure](worst_{i+1:02d}.png)\n")
+        report.append(f"### {i + 1}. abs_error = {row['abs_error']:.2f} log units\n")
+        report.append(f"![structure](worst_{i + 1:02d}.png)\n")
         report.append(
             f"- SMILES: `{row['smiles']}`\n"
             f"- True: {row['true_logd']:.2f}, Predicted: {row['pred_logd']:.2f}\n"
@@ -189,6 +257,14 @@ def run(top: int = 10, out_dir: Path | None = None) -> None:
         "median_ensemble_std": median_std,
         "std_threshold": std_thr,
         "tanimoto_threshold": tani_thr,
+        "reliability_coverage": {
+            "n_total": n_total,
+            "n_reliable": n_reliable,
+            "fraction_reliable": n_reliable / n_total,
+            "precision_within_1_log": reliable_precision,
+            "rmse_overall": full_rmse,
+            "rmse_reliable_subset": reliable_rmse,
+        },
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 

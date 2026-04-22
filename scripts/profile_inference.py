@@ -24,15 +24,16 @@ import argparse
 import gc
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TypeVar
 
 import numpy as np
 import psutil
 
 from logd.data import expansionrx
-from logd.features import FeatureSpec, featurise_batch, mol_from_smiles, morgan_fp
+from logd.features import featurise_batch, mol_from_smiles, morgan_fp
 from logd.inference import LoadedModel, load_model
 from logd.utils import get_logger, reports_dir
 
@@ -61,7 +62,10 @@ class BatchResult:
     stages: StageTiming
 
 
-def _time(fn: Callable[[], object]) -> tuple[float, object]:
+_T = TypeVar("_T")
+
+
+def _time(fn: Callable[[], _T]) -> tuple[float, _T]:
     t0 = time.perf_counter()
     out = fn()
     return time.perf_counter() - t0, out
@@ -77,19 +81,24 @@ def _profile_batch(smiles: list[str], model: LoadedModel) -> BatchResult:
     peak_rss = max(peak_rss, proc.memory_info().rss)
 
     # Stage 2: featurise — descriptors + Morgan
-    t_feat, (X, mask) = _time(lambda: featurise_batch(smiles, model.feature_spec))
+    assert model.feature_spec is not None
+    assert model.baseline is not None
+    t_feat, feat_out = _time(lambda: featurise_batch(smiles, model.feature_spec))
+    X: np.ndarray = feat_out[0]
+    mask: np.ndarray = feat_out[1]
     peak_rss = max(peak_rss, proc.memory_info().rss)
 
     # Stage 3: model forward
-    t_model, (y_pred, y_std) = _time(lambda: model.baseline.predict(X))
+    t_model, pred_out = _time(lambda: model.baseline.predict(X))  # type: ignore[union-attr]
+    y_std: np.ndarray = pred_out[1]
     peak_rss = max(peak_rss, proc.memory_info().rss)
 
     # Stage 4: uncertainty + reliability
     def _unc() -> np.ndarray:
         if X.shape[0] == 0:
             return np.zeros(0)
-        valid = [s for s, m in zip(smiles, mask) if m]
-        fps = np.stack([morgan_fp(mol_from_smiles(s)) for s in valid], axis=0)
+        valid = [s for s, m in zip(smiles, mask, strict=True) if m]
+        fps = np.stack([morgan_fp(mol_from_smiles(s)) for s in valid], axis=0)  # type: ignore[arg-type]
         nn = model.reliability.ad.nearest_similarity(fps)
         flags = model.reliability.flag(y_std, nn)
         return flags
@@ -173,9 +182,7 @@ def run(batch_sizes: list[int], output: Path | None = None) -> None:
     table_md = "\n".join(lines)
 
     out = {
-        "batch_results": [
-            {**asdict(r), "stages": asdict(r.stages)} for r in results
-        ],
+        "batch_results": [{**asdict(r), "stages": asdict(r.stages)} for r in results],
         "table_md": table_md,
     }
     output.write_text(json.dumps(out, indent=2))
@@ -185,8 +192,6 @@ def run(batch_sizes: list[int], output: Path | None = None) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--batch-sizes", type=int, nargs="+", default=[1, 100, 1000, 10000]
-    )
+    parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 100, 1000, 10000])
     args = parser.parse_args()
     run(batch_sizes=args.batch_sizes)

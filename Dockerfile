@@ -22,7 +22,7 @@ RUN apt-get update \
       libxrender1 libxext6 libsm6 libgomp1 curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.8.4 /uv /usr/local/bin/uv
 
 WORKDIR /app
 

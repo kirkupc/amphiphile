@@ -8,12 +8,12 @@ Cross-dataset deduplication by InChIKey prevents leakage.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
+from rdkit.Chem import Mol
 
 from logd.data import expansionrx, openadmet_chembl, splits
-from logd.features import FeatureSpec, featurise_batch, morgan_fp, mol_from_smiles
+from logd.features import FeatureSpec, featurise_batch, mol_from_smiles, morgan_fp
 from logd.models.baseline import train_ensemble
 from logd.models.chemprop_wrap import ChempropModel
 from logd.uncertainty import (
@@ -25,6 +25,14 @@ from logd.uncertainty import (
 from logd.utils import get_logger, models_dir, reports_dir, set_seed
 
 LOG = get_logger(__name__)
+
+
+def _safe_morgan(smiles: str) -> np.ndarray:
+    """morgan_fp with a None guard — training SMILES already passed validity checks."""
+    mol: Mol | None = mol_from_smiles(smiles)
+    if mol is None:
+        raise ValueError(f"Expected valid SMILES in training set: {smiles}")
+    return morgan_fp(mol)
 
 
 def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -48,7 +56,7 @@ def _spearman(a: np.ndarray, b: np.ndarray) -> float:
     return float(rho)
 
 
-def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1) -> dict:
+def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1, tune: bool = True) -> dict:
     """Full Day-1 pipeline. Returns metrics dict, writes artifacts to models/."""
     set_seed(seed)
 
@@ -97,30 +105,32 @@ def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1) -> dict:
     X_val, y_val = X[val_idx], y[val_idx]
     X_test, y_test = X[test_idx], y[test_idx]
 
-    LOG.info("Training baseline ensemble (k=%d)", k)
-    model = train_ensemble(X_train, y_train, X_val, y_val, feature_spec=feature_spec, k=k, base_seed=seed)
+    LOG.info("Training baseline ensemble (k=%d, tune=%s)", k, tune)
+    model = train_ensemble(
+        X_train, y_train, X_val, y_val, feature_spec=feature_spec, k=k, base_seed=seed, tune=tune
+    )
 
     y_val_pred, y_val_std = model.predict(X_val)
     y_test_pred, y_test_std = model.predict(X_test)
 
     # Build applicability-domain from training fingerprints.
     train_fps = np.stack(
-        [morgan_fp(mol_from_smiles(df["smiles"].iloc[i])) for i in valid_indices[train_idx]],
+        [_safe_morgan(df["smiles"].iloc[i]) for i in valid_indices[train_idx]],
         axis=0,
     )
     ad = ApplicabilityDomain(train_fps=train_fps)
 
     # Nearest-neighbour similarity for val + test.
     val_fps = np.stack(
-        [morgan_fp(mol_from_smiles(df["smiles"].iloc[i])) for i in valid_indices[val_idx]],
+        [_safe_morgan(df["smiles"].iloc[i]) for i in valid_indices[val_idx]],
         axis=0,
     )
     test_fps = np.stack(
-        [morgan_fp(mol_from_smiles(df["smiles"].iloc[i])) for i in valid_indices[test_idx]],
+        [_safe_morgan(df["smiles"].iloc[i]) for i in valid_indices[test_idx]],
         axis=0,
     )
     val_nn = ad.nearest_similarity(val_fps)
-    test_nn = ad.nearest_similarity(test_fps)
+    ad.nearest_similarity(test_fps)  # validated but not stored — test_nn used only for debugging
 
     conformal = ConformalCalibrator.fit(y_val, y_val_pred, y_val_std, alpha=alpha)
     std_thr, tani_thr = calibrate_thresholds(y_val, y_val_pred, y_val_std, val_nn)
@@ -134,24 +144,55 @@ def train_baseline(seed: int = 0, k: int = 5, alpha: float = 0.1) -> dict:
     y_oa = eval_df["logd"].to_numpy()[oa_mask]
     oa_pred, oa_std = model.predict(X_oa)
     oa_fps = np.stack(
-        [morgan_fp(mol_from_smiles(s)) for s, m in zip(eval_df["smiles"].tolist(), oa_mask) if m],
+        [_safe_morgan(s) for s, m in zip(eval_df["smiles"].tolist(), oa_mask, strict=True) if m],
         axis=0,
     )
-    oa_nn = ad.nearest_similarity(oa_fps)
+    ad.nearest_similarity(oa_fps)  # validated but not stored
+
+    # Random-split comparison: train a separate ensemble on random split to
+    # quantify the scaffold-vs-random gap. This demonstrates that scaffold
+    # split is the harder (and more honest) evaluation.
+    LOG.info("Training random-split baseline for comparison")
+    rand_split = splits.random_split(len(y), seed=seed)
+    rand_train_idx, rand_test_idx = rand_split.train, rand_split.test
+    rand_model = train_ensemble(
+        X[rand_train_idx],
+        y[rand_train_idx],
+        X[rand_split.val],
+        y[rand_split.val],
+        feature_spec=feature_spec,
+        k=k,
+        base_seed=seed + 100,
+    )
+    rand_test_pred, rand_test_std = rand_model.predict(X[rand_test_idx])
+    random_test_metrics = {
+        "rmse": _rmse(y[rand_test_idx], rand_test_pred),
+        "mae": _mae(y[rand_test_idx], rand_test_pred),
+        "pearson_r": _pearson(y[rand_test_idx], rand_test_pred),
+        "spearman_std_vs_abs_err": _spearman(
+            rand_test_std, np.abs(y[rand_test_idx] - rand_test_pred)
+        ),
+    }
+    LOG.info(
+        "Random-split test RMSE=%.3f vs scaffold test RMSE=%.3f",
+        random_test_metrics["rmse"],
+        _rmse(y_test, y_test_pred),
+    )
 
     metrics = {
         "model": "baseline_lightgbm_ensemble",
         "ensemble_size": k,
-        "n_train": int(len(y_train)),
-        "n_val": int(len(y_val)),
-        "n_test": int(len(y_test)),
-        "n_expansionrx": int(len(y_oa)),
+        "n_train": len(y_train),
+        "n_val": len(y_val),
+        "n_test": len(y_test),
+        "n_expansionrx": len(y_oa),
         "scaffold_test": {
             "rmse": _rmse(y_test, y_test_pred),
             "mae": _mae(y_test, y_test_pred),
             "pearson_r": _pearson(y_test, y_test_pred),
             "spearman_std_vs_abs_err": _spearman(y_test_std, np.abs(y_test - y_test_pred)),
         },
+        "random_test": random_test_metrics,
         "expansionrx": {
             "rmse": _rmse(y_oa, oa_pred),
             "mae": _mae(y_oa, oa_pred),
@@ -241,11 +282,11 @@ def train_chemprop(
     test_pred, test_std, test_mask = model.predict_smiles(test_smiles)
 
     # Applicability-domain from training fingerprints (reuses baseline approach).
-    train_fps = np.stack([morgan_fp(mol_from_smiles(s)) for s in train_smiles], axis=0)
+    train_fps = np.stack([_safe_morgan(s) for s in train_smiles], axis=0)
     ad = ApplicabilityDomain(train_fps=train_fps)
 
     val_fps = np.stack(
-        [morgan_fp(mol_from_smiles(s)) for s, m in zip(val_smiles, val_mask) if m], axis=0
+        [_safe_morgan(s) for s, m in zip(val_smiles, val_mask, strict=True) if m], axis=0
     )
     val_nn = ad.nearest_similarity(val_fps)
 
@@ -265,17 +306,15 @@ def train_chemprop(
         "model": "chemprop_v2_dmpnn_ensemble",
         "ensemble_size": k,
         "max_epochs": max_epochs,
-        "n_train": int(len(train_smiles)),
-        "n_val": int(len(val_smiles)),
-        "n_test": int(len(test_smiles)),
+        "n_train": len(train_smiles),
+        "n_val": len(val_smiles),
+        "n_test": len(test_smiles),
         "n_expansionrx": int(oa_mask.sum()),
         "scaffold_test": {
             "rmse": _rmse(y_test[test_mask], test_pred),
             "mae": _mae(y_test[test_mask], test_pred),
             "pearson_r": _pearson(y_test[test_mask], test_pred),
-            "spearman_std_vs_abs_err": _spearman(
-                test_std, np.abs(y_test[test_mask] - test_pred)
-            ),
+            "spearman_std_vs_abs_err": _spearman(test_std, np.abs(y_test[test_mask] - test_pred)),
         },
         "expansionrx": {
             "rmse": _rmse(oa_y[oa_mask], oa_pred),

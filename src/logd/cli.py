@@ -10,6 +10,7 @@ Subcommands:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import typer
@@ -21,15 +22,26 @@ LOG = get_logger(__name__)
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="logD prediction CLI.")
 
 
+def _ensure_scripts_importable() -> None:
+    """Add project root to sys.path so `from scripts.X import ...` works."""
+    src_dir = Path(__file__).resolve().parent.parent  # src/
+    project_root = src_dir.parent
+    root_str = str(project_root)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+
+
 @app.command("prepare-data")
 def prepare_data(refresh: bool = typer.Option(False, help="Re-fetch even if cached")) -> None:
     """Fetch + clean OpenADMET ChEMBL35 LogD + ExpansionRx benchmark."""
     from logd.data import expansionrx, openadmet_chembl
 
+    typer.echo("Fetching OpenADMET ChEMBL35 LogD...")
     df = openadmet_chembl.load(refresh=refresh)
-    typer.echo(f"OpenADMET ChEMBL35 LogD: {len(df)} compounds")
+    typer.echo(f"  ✓ {len(df)} compounds")
+    typer.echo("Fetching ExpansionRx benchmark...")
     oa = expansionrx.load(refresh=refresh)
-    typer.echo(f"ExpansionRx: {len(oa)} compounds")
+    typer.echo(f"  ✓ {len(oa)} compounds")
 
 
 @app.command("train")
@@ -37,16 +49,19 @@ def train(
     model: str = typer.Option("baseline", help="baseline | chemprop"),
     seed: int = typer.Option(0),
     k: int = typer.Option(5, help="Ensemble size"),
+    tune: bool = typer.Option(True, help="Run hyperparameter search (baseline only)"),
 ) -> None:
     """Train a model. baseline is Day-1 ready; chemprop lands Day 2."""
     if model == "baseline":
         from logd.training import train_baseline
 
-        metrics = train_baseline(seed=seed, k=k)
+        typer.echo(f"Training baseline ensemble (k={k}, seed={seed}, tune={tune})...")
+        metrics = train_baseline(seed=seed, k=k, tune=tune)
         typer.echo(json.dumps(metrics, indent=2))
     elif model == "chemprop":
         from logd.training import train_chemprop
 
+        typer.echo(f"Training Chemprop D-MPNN ensemble (k={k}, seed={seed})...")
         metrics = train_chemprop(seed=seed, k=k)
         typer.echo(json.dumps(metrics, indent=2))
     else:
@@ -60,10 +75,13 @@ def predict_cmd(
     model: str = typer.Option("baseline", help="baseline | chemprop"),
 ) -> None:
     """Predict logD + uncertainty + reliability. Outputs JSON lines."""
-    from logd.inference import load_model, predict as run_predict
+    from logd.inference import load_model
+    from logd.inference import predict as run_predict
 
     strs: list[str] = list(smiles or [])
     if input_file:
+        if not input_file.exists():
+            raise typer.BadParameter(f"File not found: {input_file}")
         strs.extend([line.strip() for line in input_file.read_text().splitlines() if line.strip()])
     if not strs:
         raise typer.BadParameter("Provide --smiles or --input-file")
@@ -79,6 +97,7 @@ def profile_cmd(
     output: Path = typer.Option(Path("reports/profiling.json")),
 ) -> None:
     """Profile inference pipeline across batch sizes."""
+    _ensure_scripts_importable()
     from scripts.profile_inference import run
 
     run(batch_sizes=batch_sizes, output=output)
@@ -87,6 +106,7 @@ def profile_cmd(
 @app.command("error-analysis")
 def error_analysis_cmd(top: int = typer.Option(10)) -> None:
     """Worst-N compounds on ExpansionRx with structures + rationales."""
+    _ensure_scripts_importable()
     from scripts.error_analysis import run
 
     run(top=top)
@@ -95,6 +115,7 @@ def error_analysis_cmd(top: int = typer.Option(10)) -> None:
 @app.command("data-quality")
 def data_quality_cmd() -> None:
     """Audit intra-compound std in ChEMBL to estimate the noise floor."""
+    _ensure_scripts_importable()
     from scripts.data_quality import run
 
     run()

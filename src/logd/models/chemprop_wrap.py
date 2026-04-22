@@ -24,6 +24,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -37,7 +38,7 @@ DEFAULT_BATCH_SIZE = 32
 DEFAULT_NUM_WORKERS = 0
 
 
-def _build_model() -> "chemprop.models.MPNN":  # noqa: F821
+def _build_model() -> Any:
     from chemprop import models, nn
     from chemprop.nn.metrics import MAE, RMSE
 
@@ -47,15 +48,17 @@ def _build_model() -> "chemprop.models.MPNN":  # noqa: F821
     return models.MPNN(mp, agg, ffn, batch_norm=True, metrics=[RMSE(), MAE()])
 
 
-def _build_datapoints(smiles: list[str], y: np.ndarray | None = None):
+def _build_datapoints(smiles: list[str], y: np.ndarray | None = None) -> list[Any]:
     from chemprop import data
 
     if y is None:
         return [data.MoleculeDatapoint.from_smi(s, [float("nan")]) for s in smiles]
-    return [data.MoleculeDatapoint.from_smi(s, [float(yi)]) for s, yi in zip(smiles, y)]
+    return [
+        data.MoleculeDatapoint.from_smi(s, [float(yi)]) for s, yi in zip(smiles, y, strict=True)
+    ]
 
 
-def _safe_collate_batch(batch):
+def _safe_collate_batch(batch: list[Any]) -> Any:
     """Collate with owned copies to avoid SIGSEGV from NumPy CoW + torch.from_numpy.
 
     Deep-copies every MolGraph numpy array, then converts via torch.tensor
@@ -63,7 +66,7 @@ def _safe_collate_batch(batch):
     """
     from chemprop.data.collate import BatchMolGraph, TrainingBatch
 
-    mgs, V_ds, x_ds, ys, weights, lt_masks, gt_masks = zip(*batch)
+    mgs, V_ds, x_ds, ys, weights, lt_masks, gt_masks = zip(*batch, strict=True)
 
     Vs, Es, edge_indexes, rev_edge_indexes, batch_indexes = [], [], [], [], []
     num_nodes = 0
@@ -97,10 +100,9 @@ def _safe_collate_batch(batch):
     )
 
 
-def _build_loader(smiles: list[str], y: np.ndarray | None, batch_size: int, shuffle: bool):
-    from torch.utils.data import DataLoader
-
+def _build_loader(smiles: list[str], y: np.ndarray | None, batch_size: int, shuffle: bool) -> Any:
     from chemprop import data, featurizers
+    from torch.utils.data import DataLoader
 
     datapoints = _build_datapoints(smiles, y)
     featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
@@ -198,7 +200,7 @@ class ChempropModel:
             [Chem.MolFromSmiles(s) is not None if isinstance(s, str) else False for s in smiles],
             dtype=bool,
         )
-        valid_smiles = [s for s, m in zip(smiles, valid_mask) if m]
+        valid_smiles = [s for s, m in zip(smiles, valid_mask, strict=True) if m]
 
         if not valid_smiles:
             n = len(smiles)
@@ -212,7 +214,7 @@ class ChempropModel:
         return mean.astype(np.float32), std.astype(np.float32), valid_mask
 
     @torch.no_grad()
-    def _predict_member(self, model, smiles: list[str]) -> np.ndarray:
+    def _predict_member(self, model: Any, smiles: list[str]) -> np.ndarray:
         model.eval()
         loader = _build_loader(smiles, None, DEFAULT_BATCH_SIZE, shuffle=False)
         all_preds = []
@@ -224,12 +226,12 @@ class ChempropModel:
     # ------------------------------------------------------------------
     # Serialisation
     # ------------------------------------------------------------------
-    def _save_member(self, model, path: Path) -> None:
+    def _save_member(self, model: Any, path: Path) -> None:
         from chemprop.models import save_model
 
         save_model(path, model)
 
-    def _load_models(self) -> list:
+    def _load_models(self) -> list[Any]:
         from chemprop.models import load_model
 
         config = json.loads((self.checkpoint_dir / "config.json").read_text())
@@ -237,7 +239,7 @@ class ChempropModel:
         return [load_model(self.checkpoint_dir / f"model_{i}.pt") for i in range(k)]
 
     @classmethod
-    def load(cls, checkpoint_dir: Path) -> "ChempropModel":
+    def load(cls, checkpoint_dir: Path) -> ChempropModel:
         checkpoint_dir = Path(checkpoint_dir)
         config = json.loads((checkpoint_dir / "config.json").read_text())
         return cls(checkpoint_dir=checkpoint_dir, k=int(config["k"]))

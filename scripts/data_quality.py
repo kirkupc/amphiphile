@@ -28,7 +28,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
 
 from logd.data import openadmet_chembl
 from logd.utils import get_logger, reports_dir
@@ -56,31 +56,34 @@ def run() -> None:
         100 * len(multi) / len(df),
     )
 
-    stats = {
-        "n_total": int(len(df)),
-        "n_replicate": int(len(multi)),
-        "intra_compound_std_log_units": {
-            "median": float(multi["logd_std"].median()),
-            "mean": float(multi["logd_std"].mean()),
-            "p90": float(multi["logd_std"].quantile(0.9)),
-            "max": float(multi["logd_std"].max()),
-        },
+    std_stats = {
+        "median": float(multi["logd_std"].median()),
+        "mean": float(multi["logd_std"].mean()),
+        "p90": float(multi["logd_std"].quantile(0.9)),
+        "max": float(multi["logd_std"].max()),
+    }
+    stats: dict[str, object] = {
+        "n_total": len(df),
+        "n_replicate": len(multi),
+        "intra_compound_std_log_units": std_stats,
         "implied_noise_floor_rmse_log_units": float(multi["logd_std"].mean()),
     }
     LOG.info(
         "Noise floor: median intra-compound std = %.3f log units (mean = %.3f)",
-        stats["intra_compound_std_log_units"]["median"],
-        stats["intra_compound_std_log_units"]["mean"],
+        std_stats["median"],
+        std_stats["mean"],
     )
 
     # Histogram
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.hist(multi["logd_std"].clip(upper=2.0), bins=50, color="steelblue", edgecolor="black", alpha=0.8)
+    ax.hist(
+        multi["logd_std"].clip(upper=2.0), bins=50, color="steelblue", edgecolor="black", alpha=0.8
+    )
     ax.axvline(
-        stats["intra_compound_std_log_units"]["median"],
+        std_stats["median"],
         color="crimson",
         linestyle="--",
-        label=f"median = {stats['intra_compound_std_log_units']['median']:.3f}",
+        label=f"median = {std_stats['median']:.3f}",
     )
     ax.set_xlabel("Intra-compound std across ChEMBL assays (log units)")
     ax.set_ylabel("Number of compounds")
@@ -97,6 +100,4 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    import pandas as pd  # noqa: F401 — referenced inside run()
-
     run()

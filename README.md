@@ -2,7 +2,7 @@
 
 A logD prediction service built for the deepmirror take-home. Given a list of SMILES strings, it returns a predicted logD7.4 value, an uncertainty estimate, and a reliability flag for each molecule. Invalid SMILES are handled gracefully.
 
-The model is a k=5 LightGBM ensemble trained on 23,499 compounds from OpenADMET-curated ChEMBL 35 LogD data, evaluated against 5,039 held-out drug-discovery compounds from the OpenADMET ExpansionRx challenge. Uncertainty combines three complementary signals: deep-ensemble disagreement, Mondrian conformal intervals, and applicability-domain Tanimoto similarity. A second model (Chemprop v2 D-MPNN ensemble) is also included for comparison.
+The model is a k=5 LightGBM ensemble trained on 18,799 compounds (scaffold-split from OpenADMET-curated ChEMBL 35), evaluated against 5,039 held-out drug-discovery compounds from the OpenADMET ExpansionRx challenge (zero training overlap, verified by InChIKey deduplication). Features: 31 RDKit descriptors, 6 ionisable-group counts, 2 Henderson-Hasselbalch pKa corrections, and 2048-bit Morgan fingerprints. A second model (Chemprop v2 D-MPNN ensemble, GPU-trained) is included for comparison. See [DESIGN.md](DESIGN.md) for detailed design rationale — data quality, conformal calibration, threshold tuning, feature engineering, profiling analysis, and architectural decisions.
 
 The service is exposed as a Python library, a CLI (`logd`), and a FastAPI HTTP endpoint (`POST /predict`).
 
@@ -52,7 +52,7 @@ curl -X POST http://localhost:8000/predict \
 
 ### Reproduce everything from scratch
 
-All data sources, splits, and seeds are pinned. The full pipeline takes about 10 minutes on a laptop.
+All data sources, splits, and seeds are pinned. The full pipeline takes about 10 minutes on an M-series Mac.
 
 ```bash
 uv run logd prepare-data     # fetch + cache ChEMBL LogD + ExpansionRx (pinned SHAs)
@@ -64,15 +64,13 @@ uv run logd profile          # batch 1/100/1k/10k → reports/profiling.json
 
 ### Train the Chemprop D-MPNN ensemble (GPU)
 
-The Chemprop model trains on a GPU. A Colab notebook is provided for this:
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kirkupc/amphiphile/blob/main/notebooks/train_chemprop_colab.ipynb) ~20 min on a free T4.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kirkupc/amphiphile/blob/main/notebooks/train_chemprop_colab.ipynb) ~20 min on a free T4. The notebook also recalibrates Chemprop's conformal/reliability artifacts using the current code.
 
 ### Run tests
 
 ```bash
 make check        # ruff + mypy + pytest -m 'not slow'   (under 5 s)
-make test         # adds slow tests (small Chemprop training)
+make test         # adds slow + integration tests
 ```
 
 ## Results
@@ -81,113 +79,51 @@ make test         # adds slow tests (small Chemprop training)
 
 | Model | RMSE | MAE | Pearson r | Spearman(std, \|err\|) |
 |---|--:|--:|--:|--:|
-| Baseline (LightGBM ensemble, k=5) | 0.823 | 0.564 | 0.859 | 0.236 |
+| Baseline (LightGBM ensemble, k=5) | 0.790 | 0.540 | 0.871 | 0.235 |
 | Chemprop D-MPNN (k=5) | **0.747** | **0.499** | **0.885** | 0.220 |
 
-### ExpansionRx external test (real drug-discovery data, 5,039 compounds, zero overlap with training)
+### Random-split test (same data, random 80/10/10 split)
 
 | Model | RMSE | MAE | Pearson r | Spearman(std, \|err\|) |
 |---|--:|--:|--:|--:|
-| Baseline | 0.855 | 0.655 | 0.744 | 0.006 |
+| Baseline | 0.687 | 0.445 | 0.900 | 0.275 |
+
+The 0.103 RMSE gap (0.687 → 0.790) between random and scaffold split confirms that scaffold evaluation is substantially harder — and more honest about real-world generalisation.
+
+### ExpansionRx external test (5,039 drug-discovery compounds, zero training overlap)
+
+| Model | RMSE | MAE | Pearson r | Spearman(std, \|err\|) |
+|---|--:|--:|--:|--:|
+| Baseline | 0.820 | 0.636 | 0.773 | 0.049 |
 | Chemprop | **0.749** | **0.590** | **0.784** | 0.012 |
 
-**Reading the numbers.** Chemprop outperforms the baseline across the board. On the external test (5,039 unseen drug-discovery compounds), RMSE drops from 0.855 to 0.749 — a 0.11 log-unit improvement — and Pearson r rises from 0.74 to 0.78. The graph neural network's learned molecular representation generalises better to new chemical matter than hand-crafted descriptors + fingerprints, which is the expected result for this class of models. Notably, Chemprop's scaffold-to-OOD RMSE gap is negligible (0.747 → 0.749), suggesting the D-MPNN is less prone to scaffold memorisation than the tree ensemble.
+Chemprop drops OOD RMSE from 0.820 to 0.749 with a negligible scaffold-to-OOD gap (0.747 → 0.749), suggesting the D-MPNN generalises better than hand-crafted features. The data noise floor is ~0.21 log units (median intra-compound std across ChEMBL assays). Baseline hyperparameters were tuned via grid search (27 combinations of num_leaves, learning_rate, min_child_samples); see [DESIGN.md](DESIGN.md).
 
-**The uncertainty story is mixed.** Spearman between ensemble-std and absolute error is ~0.22 on scaffold for both models (modest) and effectively zero on OOD for both. For the baseline, this is a known failure mode of seed-ensembled tree boosters: the different seeds converge to very similar predictors. Chemprop's neural ensemble shows the same pattern, likely because the D-MPNN architecture is already well-specified enough that seed variation alone doesn't produce meaningfully different models. The Tanimoto applicability-domain channel is the more reliable OOD signal for both model families — see the error analysis below.
+## Uncertainty and reliability
 
-### Data quality (ceiling reference)
+Three signals: **ensemble std** (epistemic), **conformal intervals** (ŷ ± 1.17, 90% coverage, constant-width), and **Tanimoto AD** (nearest-neighbour similarity to training set). The `uncertainty` field in predictions is ensemble std in log units.
 
-1,852 compounds in the training set have ≥2 assay observations. The distribution of intra-compound std is:
+**Reliability flag** = AND(ensemble_std ≤ threshold, Tanimoto ≥ 0.35), calibrated on val for ≥88% precision within 1 log unit. The Tanimoto channel is the binding constraint; ensemble std alone is weak on OOD data (Spearman ~0.05). Coverage on ExpansionRx reflects the genuine structural distance between ChEMBL training data and ExpansionRx's RNA-targeting drug-discovery compounds; on in-domain queries, coverage would be substantially higher.
 
-- **Median: 0.21 log units** — the typical within-compound disagreement between labs.
-- Mean: 0.58, P90: 1.55, max: 44 (ChEMBL has a few wildly inconsistent entries; median is the robust summary).
-
-Interpretation: an RMSE near ~0.5 log units on scaffold test is near the noise floor of the reference data. A much higher RMSE indicates modelling slack; much lower would be suspicious (possibly memorisation via scaffold leakage).
-
-See `reports/noise_floor.png`.
-
-## Uncertainty evaluation
-
-Three complementary signals, each serving a different purpose:
-
-1. **Ensemble std** — epistemic uncertainty from 5 differently-seeded models. Fires when the ensemble internally disagrees.
-2. **Mondrian conformal intervals** — distribution-free 90% intervals, calibrated on val. Scales with ensemble std so uncertain predictions get wider bands.
-3. **Applicability-domain Tanimoto** — max Morgan similarity of the query vs the training set. Low similarity → extrapolation beyond training distribution, independent of the ensemble's agreement.
-
-**Reliability flag** is the AND of "ensemble_std ≤ threshold" and "nearest_tanimoto ≥ threshold", with thresholds calibrated on val for target precision (≥90% of flagged-reliable predictions within 1 log unit).
-
-**How we show it's meaningful:** Spearman rank correlation between ensemble_std and |prediction error| on the external test — reported in the table above. Plus the confidence curve (RMSE vs coverage as we drop the most-uncertain predictions) in `reports/`.
-
-## Error analysis — worst 10 predictions on ExpansionRx
+## Error analysis — worst 10 on ExpansionRx
 
 See `reports/error_analysis/report.md` for structures + per-compound rationale.
 
-**Summary: 10 loud failures, 0 silent failures.** Every one of the worst-10 predictions would have been flagged unreliable by the system — either the ensemble std exceeded its threshold, or the Tanimoto AD said the compound was too far from training chemistry, or both. The reliability flag caught 100% of the worst cases in this sample.
+**9 loud failures, 1 silent failure.** The 9 would have been flagged unreliable (Tanimoto < 0.35). The 1 silent failure is a genuine blind spot — a compound that looks in-domain but has a large error. On ExpansionRx: **2,074 of 5,039 (41.2%) flagged reliable**, of which 86.1% have |error| < 1 log unit. RMSE on the reliable subset is **0.70 vs 0.82 overall**.
 
-That result answers the narrative question "does the reliability flag work on real data?": yes, on this external benchmark. More importantly, it means the OOD uncertainty signal that *is* working (Tanimoto AD) compensates for the one that isn't (ensemble std). The reliability-AND is more robust than either channel alone.
-
-## Inference profiling
-
-Across batch sizes on real drug-like compounds (ExpansionRx pool, held-out from training). Single-process, no multi-threading. M-series Mac laptop CPU.
-
-| Batch | Total (s) | Throughput (mol/s) | Parse (s) | Featurise (s) | Model (s) | Uncertainty (s) | Peak RSS (MB) |
-|------:|----------:|-------------------:|----------:|--------------:|----------:|----------------:|--------------:|
-| 1     | 0.025     | 40.1               | 0.000     | 0.002         | 0.003     | 0.020           | 522           |
-| 100   | 1.355     | 73.8               | 0.008     | 0.141         | 0.018     | 1.187           | 539           |
-| 1,000 | 13.581    | 73.6               | 0.078     | 1.394         | 0.140     | 11.969          | 1,078         |
-| 10,000| 133.852   | 74.7               | 0.797     | 14.459        | 1.116     | **117.481**     | 1,912         |
-
-**The bottleneck is the applicability-domain Tanimoto scan, not featurisation.** At batch=10k, 88% of wall time is the AD step — a dense `(batch × n_train)` Tanimoto matrix (10,000 × 18,799 = 188M pairwise computations with int32 upcast from uint8 fingerprints). Featurisation is 11%. Model forward is 0.8%.
-
-Throughput plateaus around **74 mol/s** once batching overhead is amortised; the scan is essentially linear in batch size.
-
-### Two optimisations for 100k+ molecules per request
-
-**1. Index-based applicability-domain search (#1 optimisation).** The current AD does an O(batch × n_train) dense Tanimoto matmul every call. At 100k queries × 19k training fps that's ~1.9B pairwise comparisons. A FAISS IVF-PQ index over the packed fingerprints (or an HNSW approximate-NN index over Morgan-count-vectors) would drop this to O(batch × log n_train). Expect 50–100× speedup on the AD step, which is 88% of wall time. Additional win: the dense matmul also upcasts uint8 to int64 internally in numpy; a packed-bit popcount implementation (or a C extension) would give another 4–8× on its own, independent of index use. Chosen first because it attacks the dominant stage.
-
-**2. Parallel featurisation via `multiprocessing.Pool`.** The second-largest stage at 11% of time. RDKit descriptor computation is CPU-bound Python and embarrassingly parallel. A `Pool(cpu_count())` wrapper in `featurise_batch` should cut this ~`ncores`× with no accuracy risk. On an 8-core machine this roughly halves the remaining 12% after optimisation #1, so together they'd move the overall latency floor an order of magnitude.
-
-Other optimisations we'd document but not ship first: LRU cache keyed by canonical InChIKey (production workloads repeat — typically 10-30% hit rate), ensemble distillation into a single booster (model forward is only ~1% of time today, so ordering matters less than it would in a compute-bound setting), ONNX export for Chemprop if we deploy that variant.
-
-## Design decisions
-
-**Why this data pipeline.** OpenADMET publishes a curated ChEMBL 35 LogD aggregated parquet (median + std per compound across assays) — smaller and more consistent than rolling our own `chembl_downloader` pull. We still honour the brief's "assemble from ChEMBL" by using ChEMBL-sourced data and doing our own canonicalisation/desalting/dedup on top; OpenADMET's curation is a quality-control layer, not a replacement.
-
-**Why ExpansionRx as the benchmark.** The brief asks for "the OpenADMET logD benchmark." The public OpenADMET logD benchmark is the ExpansionRx challenge training set — 5,039 compounds measured in real drug discovery at Expansion Therapeutics. Held out from ChEMBL entirely; InChIKey-deduplicated against our training set at load time.
-
-**Why scaffold split.** Random splits let tree models memorise chemical series via scaffold proximity and report inflated numbers. Scaffold splits (Bemis-Murcko) measure generalisation to new chemical matter, which is what a deployed model is held to. We report both random and scaffold numbers so the gap is visible.
-
-**Why deep ensemble + conformal + AD.** They fail independently. An ensemble can be confidently wrong when all members extrapolate the same way — the AD Tanimoto check catches that. Conformal gives calibrated intervals that compose with the ensemble-std scale. Tabular trees don't naturally produce aleatoric uncertainty, so we stick to epistemic via ensembling + the conformal shell; the data-quality audit documents the irreducible aleatoric floor separately.
-
-**Why LightGBM baseline + Chemprop as stronger.** LightGBM on descriptors + Morgan is the pre-2020 standard; fast, interpretable, hard to beat on tabular logD. Chemprop D-MPNN is the reference published graph model, well-documented, understood by reviewers. The gap between them on ExpansionRx is the modelling story.
-
-**Why salt stripping and explicit canonicalisation.** Half of ChEMBL's entries have counter-ions that are not part of the logD measurement. We strip salts via RDKit's `SaltRemover` and canonicalise explicitly, so identical molecules in different input forms produce identical predictions — test coverage enforces this.
-
-**Why a FastAPI service layer.** The brief calls it a service. An importable library is useful for internal Python callers; an HTTP endpoint is what "service" means to the rest of a stack. Both surfaces share one implementation.
+**Common pattern:** 8 of 10 share an aminoquinoline/aminonaphthaline core with amidine or guanidine substituents (pKa ~10–13, fully protonated at pH 7.4). All 10 over-predict logD — the model approximates logP but these compounds are substantially more hydrophilic due to ionisation. The Henderson-Hasselbalch features help but group-average pKa can't capture substituent effects.
 
 ## What I'd do with more time
 
-- **Aleatoric uncertainty** — an MVE (mean + variance) head in Chemprop to decompose total uncertainty into epistemic (ensemble disagreement) and aleatoric (data noise). Would let us tell "this molecule is hard" from "this measurement is noisy."
-- **Harder splits** — Butina / Taylor-Butina cluster split at a 0.4 Tanimoto threshold for a tighter generalisation test. Report the gap vs scaffold.
-- **Ensemble distillation** — actually implement it (listed above as hypothetical).
-- **Pretrained molecular representations** — MolFormer / ChemBERTa as a comparison point. Not obvious they'd win at this scale, but worth benchmarking.
-- **A retraining / monitoring loop** — production logD services drift as chemistry distributions change. A weekly revalidation against a held-out slice, with an alert if RMSE shifts > 0.1 log units.
-- **Data cleaning beyond OpenADMET** — filter out ChEMBL entries where `standard_value_std > 2.0` (bad assay noise). Would cost a small amount of training data for more reliable labels.
-- **ONNX export + hosted inference** — drops cold start and enables batched GPU inference when the service is called heavily.
+- **Per-molecule pKa predictions** via Dimorphite-DL or pkasolver — group-average pKa ignores substituent effects that shift pKa by 2+ units.
+- **Aleatoric uncertainty** — MVE head in Chemprop to separate "hard molecule" from "noisy measurement."
+- **Harder splits** — Butina cluster split at 0.4 Tanimoto for a tighter generalisation test.
+- **Packed-bit Tanimoto** — the AD scan is 88% of inference time; packing fingerprints to uint64 + popcount gives 4–8× speedup. See [DESIGN.md](DESIGN.md) for details.
+- **Retraining/monitoring loop** — weekly revalidation with drift alerts.
+- **ONNX export** — drops cold start for production deployment.
 
 ## A note on AI tools
 
-This implementation was built with heavy use of Claude (Anthropic's model, via the Claude Code CLI). I used it for:
+This implementation was built with heavy use of Claude (Anthropic's model, via the Claude Code CLI). I used it for scaffolding the package structure, writing tests against contracts I specified, drafting the FastAPI/Docker/profiler scripts, and catching bugs (e.g. a `pytorch_lightning` vs `lightning.pytorch` namespace clash in the Chemprop wrapper).
 
-- Scaffolding the package structure and typed interfaces from a hand-written plan (`PLAN.md`, kept local).
-- Writing the unit tests against the contracts I specified.
-- Drafting the FastAPI layer, Dockerfile, Makefile, and error-analysis/profiler scripts after I decided what they should do.
-- Catching at least one bug I would have shipped silently (a `pytorch_lightning` vs `lightning.pytorch` namespace clash in the Chemprop wrapper that broke trainer/model compatibility).
-
-I did not use it to:
-
-- Decide the modelling approach (featurisation, split strategy, uncertainty method) — those came from reading the problem and the brief. The model picked Chemprop only after I named it as the target.
-- Audit the data sources — I verified the OpenADMET catalog and Hugging Face dataset URLs myself (an earlier AI-guessed URL was wrong; REVIEW.md has the trace).
-- Write the design-decisions section above — the *why* is mine.
-
-Every decision in this repo is one I can defend.
+I did not use it to decide the modelling approach, audit data sources (I verified URLs myself — an AI-guessed one was wrong), or write the design decisions. Every decision in this repo is one I can defend.
