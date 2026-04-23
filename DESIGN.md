@@ -13,7 +13,7 @@ An RMSE near ~0.5 log units on scaffold test is near the noise floor of the refe
 
 ## Conformal calibration
 
-We use absolute residuals (`|y - ŷ|`) as the nonconformity score rather than the Mondrian approach of standardising by ensemble std (`|y - ŷ| / σ`). The Mondrian quantile inflated to ~10.6 because ensemble std is poorly correlated with actual error on OOD data (Spearman ~0.02) — compounds with small σ but large error produce extreme standardised residuals. With absolute residuals, the baseline's calibrated quantile is ~1.19 log units, giving constant-width 90% intervals of ŷ ± 1.19 — usable for decision-making.
+We use absolute residuals (`|y - ŷ|`) as the nonconformity score rather than the Mondrian approach of standardising by ensemble std (`|y - ŷ| / σ`). The Mondrian quantile inflated to ~10.6 because ensemble std is poorly correlated with actual error on OOD data (Spearman ~0.05) — compounds with small σ but large error produce extreme standardised residuals. With absolute residuals, the baseline's calibrated quantile is ~1.17 log units, giving constant-width 90% intervals of ŷ ± 1.17 — usable for decision-making.
 
 The Chemprop model's saved artifacts still use the Mondrian approach (quantile ~5.16) because it was trained on Colab before the conformal fix. A recalibration script (`scripts/recalibrate_chemprop.py`) exists to update conformal/reliability artifacts without retraining, but requires a GPU/Colab environment (Chemprop's PyTorch inference hits SIGSEGV on macOS ARM due to NumPy copy-on-write interactions).
 
@@ -25,7 +25,7 @@ The reliability flag is AND(ensemble_std ≤ threshold, nearest_tanimoto ≥ thr
 
 The Tanimoto grid uses absolute values (0.20, 0.25, ..., 0.60) rather than val-set quantiles. This is critical: val compounds are in-domain with high Tanimoto, so quantile-based thresholds produce strict thresholds (~0.55) that reject 99.5% of OOD data. Absolute values let the search find thresholds that transfer meaningfully to OOD.
 
-Relaxing the precision target from 90% to 88% expanded ExpansionRx coverage from 28 compounds (0.6%) to 1,042 (20.7%) — a 37× improvement — while maintaining 86.9% precision and selecting a subset with RMSE 0.68 vs 0.83 overall.
+Relaxing the precision target from 90% to 88%, combined with hyperparameter tuning (which improved ensemble calibration), expanded ExpansionRx coverage to 2,074 compounds (41.2%) with 86.1% precision and RMSE 0.70 on the reliable subset vs 0.82 overall.
 
 ## Feature engineering
 

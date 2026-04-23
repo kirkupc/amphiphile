@@ -1,13 +1,9 @@
-# Planning / review docs — kept local, not shipped to reviewers
-PLAN.md
-REVIEW.md
-REVIEW_PROMPT.md
-DECISIONS.md
+# Claude Code local state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
 
-# Claude Code / agent tooling — not relevant to reviewers
-.claude/
+# Other AI tooling
 .agents/
-CLAUDE.md
 AGENTS.md
 .cursor/
 .aider*
