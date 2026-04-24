@@ -2,7 +2,7 @@
 
 A logD prediction service. Given a list of SMILES strings, it returns a predicted logD7.4 value, an uncertainty estimate, and a reliability flag for each molecule. Invalid SMILES are handled gracefully.
 
-The model is a k=5 LightGBM ensemble trained on 18,799 compounds (scaffold-split from OpenADMET-curated ChEMBL 35), evaluated against 5,039 held-out drug-discovery compounds from the OpenADMET ExpansionRx challenge (zero training overlap, verified by InChIKey deduplication). Features: 31 RDKit descriptors, 6 ionisable-group counts, 2 Henderson-Hasselbalch pKa corrections, and 2048-bit Morgan fingerprints. A second model (Chemprop v2 D-MPNN ensemble, GPU-trained) is included for comparison. See [DESIGN.md](DESIGN.md) for detailed design rationale — data quality, conformal calibration, threshold tuning, feature engineering, profiling analysis, and architectural decisions.
+The model is a k=5 LightGBM ensemble trained on 18,799 compounds (scaffold-split from OpenADMET-curated ChEMBL 35), evaluated against 5,039 held-out drug-discovery compounds from the OpenADMET ExpansionRx challenge (zero training overlap, verified by InChIKey deduplication). Features: 31 RDKit descriptors, 6 ionisable-group counts, 2 Henderson-Hasselbalch pKa corrections, and 2048-bit Morgan fingerprints. A second model (Chemprop v2 D-MPNN ensemble, GPU-trained) is included for comparison. See [decisions.md] and (https://github.com/kirkupc/amphiphile/blob/main/.claude/decisions.md) [DESIGN.md](DESIGN.md) for detailed design rationale — data quality, conformal calibration, threshold tuning, feature engineering, profiling analysis, and architectural decisions.
 
 The service is exposed as a Python library, a CLI (`logd`), and a FastAPI HTTP endpoint (`POST /predict`).
 
@@ -65,7 +65,7 @@ uv run logd profile          # batch 1/100/1k/10k → reports/profiling.json
 
 ### Train the Chemprop D-MPNN ensemble (GPU)
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kirkupc/amphiphile/blob/main/notebooks/train_chemprop_colab.ipynb) ~20 min on a free T4. **Important:** the notebook includes a recalibration cell that fixes Chemprop's conformal intervals (the shipped artifacts use the pre-fix Mondrian approach with quantile ~5.16, which produces unusable intervals). Run recalibration before using Chemprop's uncertainty outputs.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kirkupc/amphiphile/blob/main/notebooks/train_chemprop_colab.ipynb)
 
 ### Run tests
 
@@ -89,7 +89,7 @@ make test         # adds slow + integration tests
 |---|--:|--:|--:|--:|
 | Baseline | 0.687 | 0.445 | 0.900 | 0.275 |
 
-The 0.104 RMSE gap (0.687 → 0.791) between random and scaffold split confirms that scaffold evaluation is substantially harder — and more honest about real-world generalisation.
+The 0.104 RMSE gap (0.687 → 0.791) between random and scaffold split confirms that scaffold evaluation is substantially harder.
 
 ### ExpansionRx external test (5,039 drug-discovery compounds, zero training overlap)
 
@@ -118,8 +118,6 @@ Three signals: **ensemble std** (epistemic), **conformal intervals** (constant-w
 
 Conformal and reliability thresholds are calibrated on a held-out portion of the val set (val_cal, 70%) that was not used for early stopping or hyperparameter tuning (val_select, 30%). This ensures the conformal coverage guarantee is not violated by model selection.
 
-**Reliability flag** = AND(ensemble_std ≤ threshold, Tanimoto ≥ threshold), calibrated on val_cal for ≥88% precision within 1 log unit. The Tanimoto channel is the binding constraint; ensemble std alone is weak on OOD data (Spearman ~0.05). Coverage on ExpansionRx reflects the genuine structural distance between ChEMBL training data and ExpansionRx's RNA-targeting drug-discovery compounds; on in-domain queries, coverage would be substantially higher.
-
 ## Error analysis — worst 10 on ExpansionRx
 
 See `reports/error_analysis/report.md` for structures + per-compound rationale.
@@ -139,6 +137,6 @@ See `reports/error_analysis/report.md` for structures + per-compound rationale.
 
 ## A note on AI tools
 
-This implementation was built with heavy use of Claude (Anthropic's model, via the Claude Code CLI). I used it for scaffolding the package structure, writing tests against contracts I specified, drafting the FastAPI/Docker/profiler scripts, and catching bugs (e.g. a `pytorch_lightning` vs `lightning.pytorch` namespace clash in the Chemprop wrapper).
+This implementation was built with heavy use of Claude (Anthropic's model, via the Claude Code CLI). I used it for scaffolding the package structure, writing tests against contracts, drafting the FastAPI/Docker/profiler scripts, and catching bugs. I similarly used it to supplement my knowledge of cheminformatics and to help me understand best practices for featurization and model interpretation. Given that my own background is in bioinformatics, this external information was helpful to assist in making principled modeling decisions.
 
-I did not use it to decide the modelling approach, audit data sources (I verified URLs myself — an AI-guessed one was wrong), or write the design decisions. Every decision in this repo is one I can defend.
+I did not use it to determine the modelling approach, audit data sources, or to make final design decisions.
