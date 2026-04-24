@@ -1,16 +1,16 @@
 {
   "top": 10,
-  "loud_failures": 9,
-  "silent_failures": 1,
-  "median_ensemble_std": 0.13148587546699111,
-  "std_threshold": 0.2048249744516327,
-  "tanimoto_threshold": 0.35,
+  "loud_failures": 3,
+  "silent_failures": 7,
+  "median_ensemble_std": 0.13127855668662458,
+  "std_threshold": 0.16645165828211547,
+  "tanimoto_threshold": 0.25,
   "reliability_coverage": {
     "n_total": 5039,
-    "n_reliable": 2074,
-    "fraction_reliable": 0.41158960111133164,
-    "precision_within_1_log": 0.8611378977820636,
-    "rmse_overall": 0.8199565549335154,
-    "rmse_reliable_subset": 0.6954917183311735
+    "n_reliable": 3706,
+    "fraction_reliable": 0.7354633855923794,
+    "precision_within_1_log": 0.810307609282245,
+    "rmse_overall": 0.8243918702959072,
+    "rmse_reliable_subset": 0.7911111236664463
   }
 }

@@ -84,22 +84,32 @@ def run(seed: int = 0, alpha: float = 0.1) -> dict:
     y_val = y_all[split.val]
     y_test = y_all[split.test]
 
-    LOG.info("Predicting on val (%d) and test (%d)", len(val_smiles), len(test_smiles))
-    val_pred, val_std, val_mask = model.predict_smiles(val_smiles)
+    # Use val_cal half only (matching train_chemprop's val split).
+    rng = np.random.default_rng(seed)
+    n_val = len(val_smiles)
+    perm = rng.permutation(n_val)
+    n_select = int(n_val * 0.3)
+    val_cal_idx = np.sort(perm[n_select:])
+    val_cal_smiles = [val_smiles[i] for i in val_cal_idx]
+    y_val_cal = y_val[val_cal_idx]
+    LOG.info("Using val_cal subset (%d of %d) for calibration", len(val_cal_idx), n_val)
+
+    LOG.info("Predicting on val_cal (%d) and test (%d)", len(val_cal_smiles), len(test_smiles))
+    cal_pred, cal_std, cal_mask = model.predict_smiles(val_cal_smiles)
     test_pred, test_std, test_mask = model.predict_smiles(test_smiles)
 
     LOG.info("Building applicability domain from %d training compounds", len(train_smiles))
     train_fps = np.stack([_safe_morgan(s) for s in train_smiles], axis=0)
     ad = ApplicabilityDomain(train_fps=train_fps)
 
-    val_fps = np.stack(
-        [_safe_morgan(s) for s, m in zip(val_smiles, val_mask, strict=True) if m], axis=0
+    cal_fps = np.stack(
+        [_safe_morgan(s) for s, m in zip(val_cal_smiles, cal_mask, strict=True) if m], axis=0
     )
-    val_nn = ad.nearest_similarity(val_fps)
+    cal_nn = ad.nearest_similarity(cal_fps)
 
-    LOG.info("Recalibrating conformal + thresholds")
-    conformal = ConformalCalibrator.fit(y_val[val_mask], val_pred, val_std, alpha=alpha)
-    std_thr, tani_thr = calibrate_thresholds(y_val[val_mask], val_pred, val_std, val_nn)
+    LOG.info("Recalibrating conformal + thresholds on val_cal")
+    conformal = ConformalCalibrator.fit(y_val_cal[cal_mask], cal_pred, cal_std, alpha=alpha)
+    std_thr, tani_thr = calibrate_thresholds(y_val_cal[cal_mask], cal_pred, cal_std, cal_nn)
     reliability = Reliability(
         conformal=conformal, ad=ad, std_threshold=std_thr, tanimoto_threshold=tani_thr
     )
@@ -109,11 +119,19 @@ def run(seed: int = 0, alpha: float = 0.1) -> dict:
     oa_y = eval_df["logd"].to_numpy()
     oa_pred, oa_std, oa_mask = model.predict_smiles(oa_smiles)
 
+    oa_fps = np.stack(
+        [_safe_morgan(s) for s, m in zip(oa_smiles, oa_mask, strict=True) if m], axis=0
+    )
+    oa_nn = ad.nearest_similarity(oa_fps)
+    oa_conformal_coverage = float(np.mean(np.abs(oa_y[oa_mask] - oa_pred) <= conformal.quantile))
+    oa_reliable = reliability.flag(oa_std, oa_nn)
+
     metrics = {
         "model": "chemprop_v2_dmpnn_ensemble",
         "ensemble_size": model.k,
         "n_train": len(train_smiles),
         "n_val": len(val_smiles),
+        "n_val_cal": len(val_cal_idx),
         "n_test": len(test_smiles),
         "n_expansionrx": int(oa_mask.sum()),
         "scaffold_test": {
@@ -127,6 +145,14 @@ def run(seed: int = 0, alpha: float = 0.1) -> dict:
             "mae": _mae(oa_y[oa_mask], oa_pred),
             "pearson_r": _pearson(oa_y[oa_mask], oa_pred),
             "spearman_std_vs_abs_err": _spearman(oa_std, np.abs(oa_y[oa_mask] - oa_pred)),
+            "conformal_coverage": oa_conformal_coverage,
+            "n_reliable": int(oa_reliable.sum()),
+            "frac_reliable": float(oa_reliable.mean()),
+            "rmse_reliable": (
+                _rmse(oa_y[oa_mask][oa_reliable], oa_pred[oa_reliable])
+                if oa_reliable.sum() > 0
+                else float("nan")
+            ),
         },
         "conformal": {"alpha": alpha, "quantile": conformal.quantile},
         "reliability_thresholds": {"std": std_thr, "tanimoto": tani_thr},

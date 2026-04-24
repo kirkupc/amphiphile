@@ -13,19 +13,55 @@ An RMSE near ~0.5 log units on scaffold test is near the noise floor of the refe
 
 ## Conformal calibration
 
-We use absolute residuals (`|y - ŷ|`) as the nonconformity score rather than the Mondrian approach of standardising by ensemble std (`|y - ŷ| / σ`). The Mondrian quantile inflated to ~10.6 because ensemble std is poorly correlated with actual error on OOD data (Spearman ~0.05) — compounds with small σ but large error produce extreme standardised residuals. With absolute residuals, the baseline's calibrated quantile is ~1.17 log units, giving constant-width 90% intervals of ŷ ± 1.17 — usable for decision-making.
+We use absolute residuals (`|y - ŷ|`) as the nonconformity score rather than the Mondrian approach of standardising by ensemble std (`|y - ŷ| / σ`). The Mondrian quantile inflated to ~10.6 on the baseline (and ~5.16 on Chemprop) because ensemble std is poorly correlated with actual error on OOD data (Spearman ~0.05) — compounds with small σ but large error produce extreme standardised residuals. With absolute residuals, the baseline's calibrated quantile is ~1.20 log units, giving constant-width 90% intervals of ŷ ± 1.20 — usable for decision-making.
 
-The Chemprop model's saved artifacts still use the Mondrian approach (quantile ~5.16) because it was trained on Colab before the conformal fix. A recalibration script (`scripts/recalibrate_chemprop.py`) exists to update conformal/reliability artifacts without retraining, but requires a GPU/Colab environment (Chemprop's PyTorch inference hits SIGSEGV on macOS ARM due to NumPy copy-on-write interactions).
+**Known issue: Chemprop conformal quantile is broken.** The Chemprop model's saved artifacts still use the Mondrian approach (quantile ~5.16), producing intervals of ŷ ± 5.16 — effectively useless. This happened because the model was trained on Colab before the conformal fix was applied. A recalibration script (`scripts/recalibrate_chemprop.py`) exists to update conformal/reliability artifacts without retraining; the Colab notebook includes a recalibration cell. This requires a GPU environment — Chemprop's PyTorch inference hits SIGSEGV on macOS ARM due to NumPy copy-on-write interactions despite the safe-collation workaround. **Users should run the Colab recalibration before using Chemprop's uncertainty outputs.** The baseline model's conformal calibration (quantile 1.20, 86.1% OOD coverage) is correct and production-ready.
+
+**OOD coverage check:** On ExpansionRx (genuinely OOD), the baseline's constant-width intervals achieve 86.1% empirical coverage vs the 90% target. The 3.9% gap is expected — conformal prediction guarantees marginal coverage on exchangeable data, which OOD compounds are not. The gap quantifies the distribution shift between ChEMBL training chemistry and ExpansionRx's RNA-targeting drug-discovery compounds, and is small enough that the intervals remain practically useful for ranking and triage.
 
 A further improvement would be to bin conformal calibration by Tanimoto similarity so that in-domain compounds get tighter bands than OOD ones.
 
 ## Reliability threshold calibration
 
-The reliability flag is AND(ensemble_std ≤ threshold, nearest_tanimoto ≥ threshold). Thresholds are calibrated on val via grid search targeting ≥88% precision (fraction of flagged-reliable with |error| ≤ 1 log unit).
+The reliability flag is AND(ensemble_std ≤ threshold, nearest_tanimoto ≥ threshold). Thresholds are calibrated on a held-out calibration portion (70%) of the val set (val_cal) that was not used for early stopping or hyperparameter tuning (val_select, 30%). The 30/70 split gives tuning enough data while maximising calibration set size. Grid search targets ≥88% precision (fraction of flagged-reliable with |error| ≤ 1 log unit).
 
-The Tanimoto grid uses absolute values (0.20, 0.25, ..., 0.60) rather than val-set quantiles. This is critical: val compounds are in-domain with high Tanimoto, so quantile-based thresholds produce strict thresholds (~0.55) that reject 99.5% of OOD data. Absolute values let the search find thresholds that transfer meaningfully to OOD.
+The Tanimoto grid uses absolute values (0.25, 0.30, ..., 0.60) rather than val-set quantiles. This is critical: val compounds are in-domain with high Tanimoto, so quantile-based thresholds produce strict thresholds (~0.55) that reject 99.5% of OOD data. Absolute values let the search find thresholds that transfer meaningfully to OOD. The grid search prefers the **lowest** Tanimoto threshold meeting the precision target, then maximises coverage within that tier — this prevents the search from picking strict thresholds that happen to have high precision on in-domain val data but reject most OOD compounds.
 
-Relaxing the precision target from 90% to 88%, combined with hyperparameter tuning (which improved ensemble calibration), expanded ExpansionRx coverage to 2,074 compounds (41.2%) with 86.1% precision and RMSE 0.70 on the reliable subset vs 0.82 overall.
+With these design choices, ExpansionRx coverage is 3,706 compounds (73.5%) with 81.0% precision and RMSE 0.79 on the reliable subset vs 0.82 overall. The precision is below the 88% val_cal target, which is expected — conformal and reliability guarantees are calibrated on in-domain data and degrade on OOD compounds.
+
+## Prediction bias
+
+The baseline systematically overpredicts logD on ExpansionRx (mean signed error −0.21 log units, median −0.15). The bias is strongly range-dependent:
+
+| logD range | n | Mean signed error | RMSE | % overpredicted |
+|--:|--:|--:|--:|--:|
+| [−5, 0) | 238 | −1.88 | 1.95 | 100% |
+| [0, 1) | 553 | −1.12 | 1.22 | 99% |
+| [1, 2) | 1,404 | −0.53 | 0.71 | 86% |
+| [2, 3) | 1,600 | +0.01 | 0.43 | 49% |
+| [3, 5) | 1,233 | +0.57 | 0.74 | 10% |
+
+This is regression-to-the-mean: the ChEMBL training distribution centres around logD ~2, so extreme values get pulled toward the centre. The model performs best on the most populated range (2–3, RMSE 0.43). The strong bias at the tails suggests a systematic limitation of tree-based regression on this distribution — monotonic extrapolation would help, but LightGBM doesn't natively support it without constraints.
+
+## Confidence curves
+
+**Ensemble std vs actual error.** RMSE increases monotonically across ensemble std quintiles on ExpansionRx: Q1 (lowest std) 0.76 → Q5 (highest std) 0.91. The signal is directionally correct but weak — the ratio of worst-to-best quintile RMSE is only 1.2×. This confirms that ensemble std is a useful but weak discriminator on OOD data (consistent with Spearman ~0.05).
+
+**Tanimoto similarity vs actual error.** RMSE decreases monotonically from 1.08 (Tanimoto [0.2, 0.3)) to 0.67 (Tanimoto [0.5, 0.6)). The ratio is 1.6× — substantially stronger than ensemble std. This validates the reliability flag design: the Tanimoto channel carries more information about prediction quality on OOD data than the ensemble channel.
+
+Together, these curves demonstrate that the uncertainty signals, while individually imperfect, are directionally correct and complementary. See `reports/confidence_curves.png`.
+
+## Feature importance
+
+LightGBM gain-based feature importance (averaged across 5 ensemble members) reveals:
+
+1. **MolLogP** dominates (78k gain) — unsurprising, as logD ≈ logP for neutral compounds.
+2. **estimated_logd_shift** ranks #2 (15k) — the Henderson-Hasselbalch correction is the most important custom feature.
+3. **n_acidic_oh** ranks #3 (13k) — carboxylic acids have large logD shifts from ionisation.
+4. **TPSA** and **net_charge_pH7_4** rank #5 and #6 (10k each) — polarity and charge directly affect partitioning.
+5. Several Morgan fingerprint bits appear in the top 30 (bits 1003, 463, 1838, 1308) — specific substructures carry logD-relevant information beyond global descriptors.
+
+The fact that 3 of the top 6 features are our custom pH-correction features validates the feature engineering decision. Without them, the model would rely more heavily on MolLogP alone, which ignores ionisation effects.
 
 ## Feature engineering
 

@@ -40,7 +40,7 @@ def _scaffold_smiles(smiles: str) -> str:
     try:
         scaffold = MurckoScaffold.GetScaffoldForMol(mol)
         return Chem.MolToSmiles(scaffold, canonical=True) if scaffold is not None else ""
-    except Exception:
+    except (ValueError, RuntimeError):
         return ""
 
 

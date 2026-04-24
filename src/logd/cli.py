@@ -112,6 +112,15 @@ def error_analysis_cmd(top: int = typer.Option(10)) -> None:
     run(top=top)
 
 
+@app.command("diagnostics")
+def diagnostics_cmd() -> None:
+    """Model diagnostics: bias analysis, confidence curves, feature importance."""
+    _ensure_scripts_importable()
+    from scripts.model_diagnostics import run
+
+    run()
+
+
 @app.command("data-quality")
 def data_quality_cmd() -> None:
     """Audit intra-compound std in ChEMBL to estimate the noise floor."""

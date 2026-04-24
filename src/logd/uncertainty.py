@@ -137,15 +137,19 @@ def calibrate_thresholds(
     """
     err = np.abs(y_true - y_pred)
     best: tuple[float, float] | None = None
+    best_tani = 1.0
     best_n = -1
     for std_q in np.linspace(0.3, 0.9, 7):
-        for tani_thr in [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]:
+        for tani_thr in [0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6]:
             std_thr = float(np.quantile(y_std, std_q))
             mask = (y_std <= std_thr) & (nn_sim >= tani_thr)
             if mask.sum() == 0:
                 continue
             prec = float((err[mask] <= target_within).mean())
-            if prec >= target_precision and int(mask.sum()) > best_n:
+            if prec >= target_precision and (
+                tani_thr < best_tani or (tani_thr == best_tani and int(mask.sum()) > best_n)
+            ):
+                best_tani = tani_thr
                 best_n = int(mask.sum())
                 best = (std_thr, tani_thr)
     if best is None:

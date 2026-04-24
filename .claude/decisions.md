@@ -47,7 +47,7 @@ Key diversity parameters: `feature_fraction=0.7`, `bagging_fraction=0.7`, `baggi
 **Chemprop v2 D-MPNN as the stronger model.**
 Chemprop is the reference published graph model for molecular property prediction, well-documented and understood by reviewers. It learns directly from SMILES (molecular graph) without explicit featurization. k=5 ensemble, 50 epochs, batch size 32, gradient clipping 1.0, BondMessagePassing + MeanAggregation + RegressionFFN with batch norm. Training designed for Colab GPU (T4); ~15 min per member.
 
-Results validated the choice: Chemprop RMSE 0.749 vs baseline 0.820 on ExpansionRx, with near-zero scaffold-to-OOD gap (0.747 vs 0.749), suggesting the GNN is less prone to scaffold memorization than the tree ensemble.
+Results validated the choice: Chemprop RMSE 0.749 vs baseline 0.824 on ExpansionRx, with near-zero scaffold-to-OOD gap (0.747 vs 0.749), suggesting the GNN is less prone to scaffold memorization than the tree ensemble.
 
 **Safe collation for Chemprop dataloaders.**
 Chemprop's `BatchMolGraph.__post_init__` uses `torch.from_numpy` (zero-copy). With NumPy >= 2.0 copy-on-write semantics on macOS ARM, this causes use-after-free (SIGSEGV). We provide `_safe_collate_batch` that deep-copies every MolGraph array with `np.array(..., copy=True)` then converts via `torch.tensor` (which always copies). Used for both training (Colab) and inference (local).
@@ -58,15 +58,23 @@ Chemprop's `BatchMolGraph.__post_init__` uses `torch.from_numpy` (zero-copy). Wi
 They fail independently. An ensemble can be confidently wrong when all members extrapolate the same way — the Tanimoto check catches that. Conformal gives calibrated intervals. Each serves a different purpose:
 
 1. **Ensemble std** — epistemic uncertainty. Fires when the ensemble internally disagrees.
-2. **Conformal intervals** — absolute residuals, calibrated on val. Initially used Mondrian approach (standardised by ensemble std), but the quantile inflated to ~10.6 because ensemble std is poorly correlated with actual error on OOD data (Spearman ~0.05). Switched to absolute residuals: constant-width intervals ŷ ± 1.17.
+2. **Conformal intervals** — absolute residuals, calibrated on val_cal. Initially used Mondrian approach (standardised by ensemble std), but the quantile inflated to ~10.6 because ensemble std is poorly correlated with actual error on OOD data (Spearman ~0.05). Switched to absolute residuals: constant-width intervals ŷ ± 1.20.
 3. **Applicability-domain Tanimoto** — max Morgan similarity of the query vs the training set. Independent of the ensemble's agreement. Chunked at 1024 molecules to bound memory.
 
+**Val split: val_select (30%) + val_cal (70%).**
+Val set split 30/70 into val_select (early stopping + hyperparameter tuning) and val_cal (conformal calibration + threshold calibration). The asymmetric split gives calibration more data since tuning needs fewer points. This separation ensures conformal coverage guarantees are not violated by model selection.
+
 **Reliability flag: AND of two thresholds.**
-`reliable := (ensemble_std <= threshold) AND (nearest_tanimoto >= threshold)`. Thresholds calibrated on validation via grid search (7 std quantiles × 9 Tanimoto thresholds) targeting ≥88% precision (flagged-reliable predictions within 1 log unit of truth).
+`reliable := (ensemble_std <= threshold) AND (nearest_tanimoto >= threshold)`. Thresholds calibrated on val_cal via grid search (7 std quantiles × 8 Tanimoto thresholds) targeting ≥88% precision (flagged-reliable predictions within 1 log unit of truth).
 
-Critical design choice: the Tanimoto grid uses absolute values (0.20, 0.25, ..., 0.60), not val-set quantiles. Val compounds are in-domain with high Tanimoto, so quantile-based thresholds produced strict values (~0.55) that rejected 99.5% of OOD data. Absolute values let the search find thresholds that transfer meaningfully to OOD.
+Critical design choice: the Tanimoto grid uses absolute values (0.25, 0.30, ..., 0.60), not val-set quantiles. Val compounds are in-domain with high Tanimoto, so quantile-based thresholds produced strict values (~0.55) that rejected 99.5% of OOD data. Absolute values let the search find thresholds that transfer meaningfully to OOD.
 
-The AND logic is the key — either channel can veto. This is why the reliability flag catches 9/10 worst predictions on ExpansionRx even though ensemble std alone is nearly uncorrelated with error on OOD.
+The grid search prefers the **lowest** Tanimoto threshold meeting the precision target, then maximises coverage within that tier. Without this preference, the search picks strict thresholds (e.g. 0.45) that have high precision on in-domain val but reject 90%+ of OOD compounds. With it, the search finds Tanimoto 0.25 — covering 73.5% of ExpansionRx with 81% precision (below the 88% val target, as expected for OOD).
+
+The AND logic is the key — either channel can veto. This is why the reliability flag catches the worst predictions on ExpansionRx even though ensemble std alone is nearly uncorrelated with error on OOD.
+
+**Conformal OOD coverage check.**
+Computed empirical conformal coverage on ExpansionRx (genuinely OOD): 86.1% vs 90% target. The 3.9% gap quantifies distribution shift — conformal guarantees marginal coverage on exchangeable data, which OOD compounds are not. Small enough that constant-width intervals remain practically useful.
 
 ## Infrastructure
 
@@ -81,6 +89,17 @@ Separate layer for dependency caching (pyproject.toml + uv.lock copied first, th
 
 **Code quality: ruff + mypy strict + pytest with markers.**
 `make check` runs lint + typecheck + fast tests in under 5 seconds. Slow tests (Chemprop training) marked `@pytest.mark.slow` and excluded by default. 49 fast tests, 8 slow tests.
+
+## Model diagnostics
+
+**Prediction bias analysis.**
+The baseline systematically overpredicts logD on ExpansionRx (mean signed error −0.21). Bias is range-dependent: 100% overprediction for logD < 0, near-zero at logD 2–3, underprediction above 3. This is regression-to-the-mean — training distribution centres around logD ~2.
+
+**Confidence curves.**
+RMSE increases monotonically with ensemble std quintile (0.76 → 0.91, ratio 1.2×) and decreases with Tanimoto similarity (1.08 → 0.67, ratio 1.6×). Tanimoto is the stronger discriminator on OOD data, validating its role as the binding constraint in the reliability flag.
+
+**Feature importance.**
+MolLogP dominates (78k gain). Henderson-Hasselbalch estimated_logd_shift is #2 (15k), n_acidic_oh #3 (13k), net_charge_pH7_4 #6 (10k). Three of the top 6 features are custom pH-correction features, validating the feature engineering decision.
 
 ## Profiling
 

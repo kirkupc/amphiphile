@@ -194,13 +194,13 @@ class ChempropModel:
     @torch.no_grad()
     def predict_smiles(self, smiles: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Predict (mean, std, valid_mask) across the ensemble."""
-        from rdkit import Chem
+        from logd.features import mol_from_smiles
 
-        valid_mask = np.array(
-            [Chem.MolFromSmiles(s) is not None if isinstance(s, str) else False for s in smiles],
-            dtype=bool,
-        )
-        valid_smiles = [s for s, m in zip(smiles, valid_mask, strict=True) if m]
+        mols = [mol_from_smiles(s) if isinstance(s, str) else None for s in smiles]
+        valid_mask = np.array([m is not None for m in mols], dtype=bool)
+        from rdkit.Chem import MolToSmiles
+
+        valid_smiles = [MolToSmiles(m) for m in mols if m is not None]
 
         if not valid_smiles:
             n = len(smiles)

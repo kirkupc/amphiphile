@@ -133,7 +133,7 @@ def canonicalise(smiles: str) -> str | None:
         return None
     try:
         return Chem.MolToSmiles(mol, canonical=True)
-    except Exception:
+    except (ValueError, RuntimeError):
         return None
 
 
@@ -156,7 +156,7 @@ def descriptors(mol: Chem.Mol) -> np.ndarray:
     for i, (_, fn) in enumerate(_DESCRIPTOR_FNS):
         try:
             v = fn(mol)
-        except Exception:
+        except (ValueError, RuntimeError, ZeroDivisionError):
             v = 0.0
         if v is None or not np.isfinite(v):
             v = 0.0

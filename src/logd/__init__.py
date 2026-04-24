@@ -1,4 +1,4 @@
-"""logD prediction service — deepmirror take-home."""
+"""logD prediction service."""
 
 # Colab sets MPLBACKEND to 'module://matplotlib_inline.backend_inline' at
 # kernel start, but a fresh matplotlib install may not register that backend
